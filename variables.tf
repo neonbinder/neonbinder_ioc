@@ -66,6 +66,13 @@ variable "cloud_run_max_instances" {
 
 
 # Tags and Labels
+# GitHub Actions
+variable "github_repo" {
+  description = "GitHub repository (owner/repo) allowed to authenticate via WIF"
+  type        = string
+  default     = "neonbinder/neonbinder_browser"
+}
+
 variable "common_labels" {
   description = "Common labels to apply to all resources"
   type        = map(string)
