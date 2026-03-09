@@ -169,6 +169,12 @@ resource "google_project_iam_member" "storage_admin" {
   member  = "serviceAccount:${google_service_account.neonbinder_browser.email}"
 }
 
+resource "google_project_iam_member" "artifactregistry_writer" {
+  project = var.gcp_project_id
+  role    = "roles/artifactregistry.writer"
+  member  = "serviceAccount:${google_service_account.neonbinder_browser.email}"
+}
+
 resource "google_project_iam_member" "service_account_user" {
   project = var.gcp_project_id
   role    = "roles/iam.serviceAccountUser"
