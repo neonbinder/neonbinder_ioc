@@ -118,6 +118,13 @@ resource "google_secret_manager_secret_iam_member" "runtime_api_key_access" {
   member    = "serviceAccount:${google_service_account.runtime.email}"
 }
 
+# Deployer SA needs to read the API key secret (for post-deploy smoke tests)
+resource "google_secret_manager_secret_iam_member" "deployer_api_key_access" {
+  secret_id = google_secret_manager_secret.internal_api_key.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.deployer.email}"
+}
+
 # ──────────────────────────────────────────────
 # Cloud Run Service
 # ──────────────────────────────────────────────
