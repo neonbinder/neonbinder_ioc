@@ -2,7 +2,7 @@
 variable "gcp_project_id" {
   description = "GCP Project ID"
   type        = string
-  default     = "neonbinder"
+  default     = "neonbinder-484017"
 }
 
 variable "gcp_region" {
@@ -17,20 +17,17 @@ variable "gcp_zone" {
   default     = "us-central1-a"
 }
 
-# Service Account Configuration
-variable "service_account_name" {
-  description = "Name for the service account"
+# Environment
+variable "environment" {
+  description = "Deployment environment"
   type        = string
-  default     = "neonbinder-browser-runner"
+  default     = "prod"
+
+  validation {
+    condition     = contains(["dev", "prod"], var.environment)
+    error_message = "Environment must be 'dev' or 'prod'."
+  }
 }
-
-variable "service_account_display_name" {
-  description = "Display name for the service account"
-  type        = string
-  default     = "Neon Binder Browser Automation Runner"
-}
-
-
 
 # Cloud Run Configuration
 variable "cloud_run_service_name" {
@@ -63,9 +60,6 @@ variable "cloud_run_max_instances" {
   default     = 10
 }
 
-
-
-# Tags and Labels
 # GitHub Actions
 variable "github_repo" {
   description = "GitHub repository (owner/repo) allowed to authenticate via WIF"
@@ -73,6 +67,20 @@ variable "github_repo" {
   default     = "neonbinder/neonbinder_browser"
 }
 
+variable "wif_branch_ref" {
+  description = "Git branch ref allowed for WIF authentication (e.g. refs/heads/main)"
+  type        = string
+  default     = "refs/heads/main"
+}
+
+# Conditional resources
+variable "create_prizes_bucket" {
+  description = "Whether to create the prizes GCS bucket (prod only)"
+  type        = bool
+  default     = true
+}
+
+# Tags and Labels
 variable "common_labels" {
   description = "Common labels to apply to all resources"
   type        = map(string)
@@ -81,4 +89,4 @@ variable "common_labels" {
     environment = "production"
     managed_by  = "terraform"
   }
-} 
+}

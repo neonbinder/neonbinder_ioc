@@ -1,6 +1,6 @@
 terraform {
   required_version = ">= 1.0"
-  
+
   required_providers {
     google = {
       source  = "hashicorp/google"
@@ -8,11 +8,10 @@ terraform {
     }
   }
 
-  # Optional: Use GCS for remote state storage
-  # backend "gcs" {
-  #   bucket = "neonbinder-terraform-state"
-  #   prefix = "terraform/state"
-  # }
+  # GCS remote state — prefix set at init time via -backend-config="prefix=terraform/state/<env>"
+  backend "gcs" {
+    bucket = "neonbinder-terraform-state"
+  }
 }
 
 # Configure the Google Provider
@@ -21,57 +20,141 @@ provider "google" {
   region  = var.gcp_region
 }
 
+# ──────────────────────────────────────────────
+# Service Accounts — split into runtime + deployer
+# ──────────────────────────────────────────────
 
-
-# Variables are defined in variables.tf
-
-# GCP Resources
-
-# Service Account for the browser automation
-resource "google_service_account" "neonbinder_browser" {
-  account_id   = var.service_account_name
-  display_name = "Neon Binder Browser Automation Runner"
-  description  = "Service account for browser automation and site scraping"
+# Runtime SA: attached to the Cloud Run service at runtime
+resource "google_service_account" "runtime" {
+  account_id   = "neonbinder-browser-runtime"
+  display_name = "NeonBinder Browser Runtime"
+  description  = "Runtime service account for the browser automation Cloud Run service"
 }
 
-# IAM bindings for the service account
-resource "google_project_iam_member" "secretmanager_accessor" {
+# Deployer SA: used by GitHub Actions via WIF to deploy
+resource "google_service_account" "deployer" {
+  account_id   = "neonbinder-browser-deployer"
+  display_name = "NeonBinder Browser Deployer"
+  description  = "Deployer service account for GitHub Actions CI/CD"
+}
+
+# ──────────────────────────────────────────────
+# Runtime SA IAM — minimal permissions
+# ──────────────────────────────────────────────
+
+resource "google_project_iam_member" "runtime_secret_accessor" {
   project = var.gcp_project_id
   role    = "roles/secretmanager.secretAccessor"
-  member  = "serviceAccount:${google_service_account.neonbinder_browser.email}"
+  member  = "serviceAccount:${google_service_account.runtime.email}"
 }
 
-resource "google_project_iam_member" "logging_writer" {
+resource "google_project_iam_member" "runtime_secret_version_manager" {
+  project = var.gcp_project_id
+  role    = "roles/secretmanager.secretVersionManager"
+  member  = "serviceAccount:${google_service_account.runtime.email}"
+}
+
+resource "google_project_iam_member" "runtime_logging_writer" {
   project = var.gcp_project_id
   role    = "roles/logging.logWriter"
-  member  = "serviceAccount:${google_service_account.neonbinder_browser.email}"
+  member  = "serviceAccount:${google_service_account.runtime.email}"
 }
 
-resource "google_project_iam_member" "run_invoker" {
+# Runtime SA gets run.invoker scoped to the specific Cloud Run service
+resource "google_cloud_run_service_iam_member" "runtime_invoker" {
+  location = google_cloud_run_service.neonbinder_browser.location
+  service  = google_cloud_run_service.neonbinder_browser.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.runtime.email}"
+}
+
+# ──────────────────────────────────────────────
+# Deployer SA IAM — deployment permissions
+# ──────────────────────────────────────────────
+
+resource "google_project_iam_member" "deployer_run_admin" {
   project = var.gcp_project_id
-  role    = "roles/run.invoker"
-  member  = "serviceAccount:${google_service_account.neonbinder_browser.email}"
+  role    = "roles/run.admin"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
 }
 
-# Cloud Run service (optional - if you want to manage it via Terraform)
+resource "google_project_iam_member" "deployer_artifactregistry_writer" {
+  project = var.gcp_project_id
+  role    = "roles/artifactregistry.writer"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_project_iam_member" "deployer_storage_admin" {
+  project = var.gcp_project_id
+  role    = "roles/storage.admin"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+# Deployer can act as the runtime SA (scoped to SA-level, not project-level)
+resource "google_service_account_iam_member" "deployer_act_as_runtime" {
+  service_account_id = google_service_account.runtime.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+# ──────────────────────────────────────────────
+# Secret Manager — INTERNAL_API_KEY
+# ──────────────────────────────────────────────
+
+resource "google_secret_manager_secret" "internal_api_key" {
+  secret_id = "internal-api-key"
+
+  replication {
+    auto {}
+  }
+
+  labels = var.common_labels
+}
+
+# Runtime SA needs to read the API key secret
+resource "google_secret_manager_secret_iam_member" "runtime_api_key_access" {
+  secret_id = google_secret_manager_secret.internal_api_key.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.runtime.email}"
+}
+
+# ──────────────────────────────────────────────
+# Cloud Run Service
+# ──────────────────────────────────────────────
+
 resource "google_cloud_run_service" "neonbinder_browser" {
-  name     = "neonbinder-browser"
+  name     = var.cloud_run_service_name
   location = var.gcp_region
 
   template {
     spec {
       containers {
-        image = "gcr.io/${var.gcp_project_id}/neonbinder-browser:latest"
-        
+        image = var.cloud_run_image
+
         resources {
           limits = {
-            cpu    = "1000m"
-            memory = "1Gi"
+            cpu    = var.cloud_run_cpu
+            memory = var.cloud_run_memory
           }
         }
+
+        env {
+          name = "INTERNAL_API_KEY"
+          value_from {
+            secret_key_ref {
+              name = google_secret_manager_secret.internal_api_key.secret_id
+              key  = "latest"
+            }
+          }
+        }
+
+        env {
+          name  = "ENVIRONMENT"
+          value = var.environment
+        }
       }
-      
-      service_account_name = google_service_account.neonbinder_browser.email
+
+      service_account_name = google_service_account.runtime.email
     }
   }
 
@@ -85,7 +168,9 @@ resource "google_cloud_run_service" "neonbinder_browser" {
   }
 }
 
-# IAM policy to allow unauthenticated access to Cloud Run
+# Allow unauthenticated access to Cloud Run.
+# Convex cannot perform GCP IAM auth, so we rely on the INTERNAL_API_KEY header
+# (validated with timing-safe comparison + rate limiting) for authentication.
 resource "google_cloud_run_service_iam_member" "public_access" {
   location = google_cloud_run_service.neonbinder_browser.location
   service  = google_cloud_run_service.neonbinder_browser.name
@@ -93,19 +178,21 @@ resource "google_cloud_run_service_iam_member" "public_access" {
   member   = "allUsers"
 }
 
+# ──────────────────────────────────────────────
+# GCS Bucket for prizes (prod only)
+# ──────────────────────────────────────────────
 
-
-# GCS Bucket for prizes
 resource "google_storage_bucket" "neonbinder_prizes" {
-  name     = "neonbinder-prizes"
+  count    = var.create_prizes_bucket ? 1 : 0
+  name     = "neonbinder-prizes-${var.gcp_project_id}"
   location = var.gcp_region
-  
+
   uniform_bucket_level_access = true
-  
+
   versioning {
     enabled = false
   }
-  
+
   lifecycle_rule {
     action {
       type = "Delete"
@@ -114,18 +201,22 @@ resource "google_storage_bucket" "neonbinder_prizes" {
       age = 365  # Delete objects older than 1 year
     }
   }
-  
+
   labels = var.common_labels
 }
 
 # Grant neonbinder-convex service account access to the prizes bucket
 resource "google_storage_bucket_iam_member" "neonbinder_convex_prizes_admin" {
-  bucket = google_storage_bucket.neonbinder_prizes.name
+  count  = var.create_prizes_bucket ? 1 : 0
+  bucket = google_storage_bucket.neonbinder_prizes[0].name
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:neonbinder-convex@${var.gcp_project_id}.iam.gserviceaccount.com"
 }
 
+# ──────────────────────────────────────────────
 # Workload Identity Federation for GitHub Actions
+# ──────────────────────────────────────────────
+
 resource "google_iam_workload_identity_pool" "github_actions" {
   workload_identity_pool_id = "github-actions"
   display_name              = "GitHub Actions"
@@ -140,51 +231,35 @@ resource "google_iam_workload_identity_pool_provider" "github" {
   attribute_mapping = {
     "google.subject"       = "assertion.sub"
     "attribute.repository" = "assertion.repository"
+    "attribute.ref"        = "assertion.ref"
   }
 
-  attribute_condition = "assertion.repository == \"${var.github_repo}\""
+  attribute_condition = "assertion.repository == \"${var.github_repo}\" && assertion.ref == \"${var.wif_branch_ref}\""
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
   }
 }
 
-# Allow GitHub Actions to impersonate the service account
+# Allow GitHub Actions to impersonate the deployer SA (not the runtime SA)
 resource "google_service_account_iam_member" "github_actions_wif" {
-  service_account_id = google_service_account.neonbinder_browser.name
+  service_account_id = google_service_account.deployer.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_actions.name}/attribute.repository/${var.github_repo}"
 }
 
-# Additional IAM roles for deployment
-resource "google_project_iam_member" "run_admin" {
-  project = var.gcp_project_id
-  role    = "roles/run.admin"
-  member  = "serviceAccount:${google_service_account.neonbinder_browser.email}"
-}
-
-resource "google_project_iam_member" "storage_admin" {
-  project = var.gcp_project_id
-  role    = "roles/storage.admin"
-  member  = "serviceAccount:${google_service_account.neonbinder_browser.email}"
-}
-
-resource "google_project_iam_member" "artifactregistry_writer" {
-  project = var.gcp_project_id
-  role    = "roles/artifactregistry.writer"
-  member  = "serviceAccount:${google_service_account.neonbinder_browser.email}"
-}
-
-resource "google_project_iam_member" "service_account_user" {
-  project = var.gcp_project_id
-  role    = "roles/iam.serviceAccountUser"
-  member  = "serviceAccount:${google_service_account.neonbinder_browser.email}"
-}
-
+# ──────────────────────────────────────────────
 # Outputs
-output "service_account_email" {
-  description = "Email of the created service account"
-  value       = google_service_account.neonbinder_browser.email
+# ──────────────────────────────────────────────
+
+output "runtime_service_account_email" {
+  description = "Email of the runtime service account"
+  value       = google_service_account.runtime.email
+}
+
+output "deployer_service_account_email" {
+  description = "Email of the deployer service account"
+  value       = google_service_account.deployer.email
 }
 
 output "cloud_run_url" {
@@ -194,12 +269,12 @@ output "cloud_run_url" {
 
 output "prizes_bucket_name" {
   description = "Name of the prizes GCS bucket"
-  value       = google_storage_bucket.neonbinder_prizes.name
+  value       = var.create_prizes_bucket ? google_storage_bucket.neonbinder_prizes[0].name : ""
 }
 
 output "prizes_bucket_url" {
   description = "URL of the prizes GCS bucket"
-  value       = google_storage_bucket.neonbinder_prizes.url
+  value       = var.create_prizes_bucket ? google_storage_bucket.neonbinder_prizes[0].url : ""
 }
 
 output "wif_provider_name" {
