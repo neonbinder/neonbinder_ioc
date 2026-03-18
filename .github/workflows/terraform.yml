@@ -43,7 +43,6 @@ jobs:
         with:
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: ${{ env.TF_SERVICE_ACCOUNT }}
-          token_format: 'access_token'
 
       - uses: hashicorp/setup-terraform@v3
         with:
