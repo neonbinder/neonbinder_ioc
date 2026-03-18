@@ -87,9 +87,11 @@ resource "google_project_iam_member" "deployer_artifactregistry_writer" {
   member  = "serviceAccount:${google_service_account.deployer.email}"
 }
 
-resource "google_project_iam_member" "deployer_storage_admin" {
+# objectAdmin (not storage.admin) — deployer only needs to push/pull Docker images
+# to GCR, not create/delete buckets
+resource "google_project_iam_member" "deployer_storage_object_admin" {
   project = var.gcp_project_id
-  role    = "roles/storage.admin"
+  role    = "roles/storage.objectAdmin"
   member  = "serviceAccount:${google_service_account.deployer.email}"
 }
 
@@ -396,6 +398,37 @@ resource "google_service_account_iam_member" "github_actions_wif_terraform" {
   service_account_id = google_service_account.terraform_deployer.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_actions.name}/attribute.repository/${var.github_repo_terraform}"
+}
+
+# ──────────────────────────────────────────────
+# Cloud Audit Logging — data access logs for security-sensitive services
+# ──────────────────────────────────────────────
+
+resource "google_project_iam_audit_config" "iam_audit" {
+  project = var.gcp_project_id
+  service = "iam.googleapis.com"
+
+  audit_log_config {
+    log_type = "ADMIN_READ"
+  }
+  audit_log_config {
+    log_type = "DATA_WRITE"
+  }
+}
+
+resource "google_project_iam_audit_config" "secretmanager_audit" {
+  project = var.gcp_project_id
+  service = "secretmanager.googleapis.com"
+
+  audit_log_config {
+    log_type = "ADMIN_READ"
+  }
+  audit_log_config {
+    log_type = "DATA_READ"
+  }
+  audit_log_config {
+    log_type = "DATA_WRITE"
+  }
 }
 
 # ──────────────────────────────────────────────

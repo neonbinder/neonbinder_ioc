@@ -11,12 +11,6 @@ variable "gcp_region" {
   default     = "us-central1"
 }
 
-variable "gcp_zone" {
-  description = "GCP Zone (for resources that need it)"
-  type        = string
-  default     = "us-central1-a"
-}
-
 # Environment
 variable "environment" {
   description = "Deployment environment"
@@ -52,12 +46,6 @@ variable "cloud_run_memory" {
   description = "Memory allocation for Cloud Run service"
   type        = string
   default     = "1Gi"
-}
-
-variable "cloud_run_max_instances" {
-  description = "Maximum number of instances for Cloud Run service"
-  type        = number
-  default     = 10
 }
 
 # GitHub Actions
