@@ -34,11 +34,20 @@ jobs:
             echo "STATE_PREFIX=terraform/state/dev" >> $GITHUB_ENV
           fi
 
+      - name: Debug auth inputs
+        run: |
+          echo "ENV_NAME=${{ env.ENV_NAME }}"
+          echo "WIF_PROVIDER length: $(echo -n '${{ env.ENV_NAME == 'prod' && secrets.GCP_WIF_PROVIDER_TF || secrets.GCP_WIF_PROVIDER_TF_DEV }}' | wc -c)"
+          echo "SERVICE_ACCOUNT length: $(echo -n '${{ env.ENV_NAME == 'prod' && secrets.GCP_TF_SERVICE_ACCOUNT || secrets.GCP_TF_SERVICE_ACCOUNT_DEV }}' | wc -c)"
+          echo "WIF_PROVIDER_TF_DEV set: ${{ secrets.GCP_WIF_PROVIDER_TF_DEV != '' }}"
+          echo "TF_SERVICE_ACCOUNT_DEV set: ${{ secrets.GCP_TF_SERVICE_ACCOUNT_DEV != '' }}"
+
       - id: auth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ env.ENV_NAME == 'prod' && secrets.GCP_WIF_PROVIDER_TF || secrets.GCP_WIF_PROVIDER_TF_DEV }}
           service_account: ${{ env.ENV_NAME == 'prod' && secrets.GCP_TF_SERVICE_ACCOUNT || secrets.GCP_TF_SERVICE_ACCOUNT_DEV }}
+          token_format: 'access_token'
 
       - uses: hashicorp/setup-terraform@v3
         with:
