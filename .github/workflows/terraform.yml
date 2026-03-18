@@ -24,29 +24,25 @@ jobs:
           REF="${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}"
           if [ "$REF" = "main" ]; then
             echo "ENV_NAME=prod" >> $GITHUB_ENV
-            echo "GCP_PROJECT=neonbinder" >> $GITHUB_ENV
+            echo "GCP_PROJECT=neonbinder-484017" >> $GITHUB_ENV
             echo "TF_VAR_FILE=environments/prod.tfvars" >> $GITHUB_ENV
             echo "STATE_PREFIX=terraform/state/prod" >> $GITHUB_ENV
+            echo "WIF_PROVIDER=projects/211831470630/locations/global/workloadIdentityPools/github-actions/providers/github-terraform" >> $GITHUB_ENV
+            echo "TF_SERVICE_ACCOUNT=neonbinder-tf-deployer@neonbinder-484017.iam.gserviceaccount.com" >> $GITHUB_ENV
           else
             echo "ENV_NAME=dev" >> $GITHUB_ENV
             echo "GCP_PROJECT=neonbinder-dev-io" >> $GITHUB_ENV
             echo "TF_VAR_FILE=environments/dev.tfvars" >> $GITHUB_ENV
             echo "STATE_PREFIX=terraform/state/dev" >> $GITHUB_ENV
+            echo "WIF_PROVIDER=projects/874494136386/locations/global/workloadIdentityPools/github-actions/providers/github-terraform" >> $GITHUB_ENV
+            echo "TF_SERVICE_ACCOUNT=neonbinder-tf-deployer@neonbinder-dev-io.iam.gserviceaccount.com" >> $GITHUB_ENV
           fi
-
-      - name: Debug auth inputs
-        run: |
-          echo "ENV_NAME=${{ env.ENV_NAME }}"
-          echo "WIF_PROVIDER length: $(echo -n '${{ env.ENV_NAME == 'prod' && secrets.GCP_WIF_PROVIDER_TF || secrets.GCP_WIF_PROVIDER_TF_DEV }}' | wc -c)"
-          echo "SERVICE_ACCOUNT length: $(echo -n '${{ env.ENV_NAME == 'prod' && secrets.GCP_TF_SERVICE_ACCOUNT || secrets.GCP_TF_SERVICE_ACCOUNT_DEV }}' | wc -c)"
-          echo "WIF_PROVIDER_TF_DEV set: ${{ secrets.GCP_WIF_PROVIDER_TF_DEV != '' }}"
-          echo "TF_SERVICE_ACCOUNT_DEV set: ${{ secrets.GCP_TF_SERVICE_ACCOUNT_DEV != '' }}"
 
       - id: auth
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ env.ENV_NAME == 'prod' && secrets.GCP_WIF_PROVIDER_TF || secrets.GCP_WIF_PROVIDER_TF_DEV }}
-          service_account: ${{ env.ENV_NAME == 'prod' && secrets.GCP_TF_SERVICE_ACCOUNT || secrets.GCP_TF_SERVICE_ACCOUNT_DEV }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.TF_SERVICE_ACCOUNT }}
           token_format: 'access_token'
 
       - uses: hashicorp/setup-terraform@v3
