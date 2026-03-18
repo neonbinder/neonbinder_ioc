@@ -300,6 +300,85 @@ resource "google_service_account_iam_member" "github_actions_wif" {
 }
 
 # ──────────────────────────────────────────────
+# Terraform Deployer SA — used by GitHub Actions to apply Terraform
+# ──────────────────────────────────────────────
+
+resource "google_service_account" "terraform_deployer" {
+  account_id   = "neonbinder-tf-deployer"
+  display_name = "NeonBinder Terraform Deployer"
+  description  = "Service account for Terraform CI/CD via GitHub Actions"
+}
+
+# Terraform deployer permissions — manages all resources in the project
+resource "google_project_iam_member" "tf_deployer_sa_admin" {
+  project = var.gcp_project_id
+  role    = "roles/iam.serviceAccountAdmin"
+  member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+resource "google_project_iam_member" "tf_deployer_iam_security_admin" {
+  project = var.gcp_project_id
+  role    = "roles/iam.securityAdmin"
+  member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+resource "google_project_iam_member" "tf_deployer_run_admin" {
+  project = var.gcp_project_id
+  role    = "roles/run.admin"
+  member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+resource "google_project_iam_member" "tf_deployer_secret_admin" {
+  project = var.gcp_project_id
+  role    = "roles/secretmanager.admin"
+  member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+resource "google_project_iam_member" "tf_deployer_storage_admin" {
+  project = var.gcp_project_id
+  role    = "roles/storage.admin"
+  member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+resource "google_project_iam_member" "tf_deployer_wif_admin" {
+  project = var.gcp_project_id
+  role    = "roles/iam.workloadIdentityPoolAdmin"
+  member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+resource "google_project_iam_member" "tf_deployer_sa_user" {
+  project = var.gcp_project_id
+  role    = "roles/iam.serviceAccountUser"
+  member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+# WIF provider for the Terraform repo
+resource "google_iam_workload_identity_pool_provider" "github_terraform" {
+  workload_identity_pool_id          = google_iam_workload_identity_pool.github_actions.workload_identity_pool_id
+  workload_identity_pool_provider_id = "github-terraform"
+  display_name                       = "GitHub Terraform"
+
+  attribute_mapping = {
+    "google.subject"       = "assertion.sub"
+    "attribute.repository" = "assertion.repository"
+    "attribute.ref"        = "assertion.ref"
+  }
+
+  attribute_condition = "assertion.repository == \"${var.github_repo_terraform}\" && assertion.ref == \"${var.wif_branch_ref}\""
+
+  oidc {
+    issuer_uri = "https://token.actions.githubusercontent.com"
+  }
+}
+
+# Allow GitHub Actions (terraform repo) to impersonate the terraform deployer SA
+resource "google_service_account_iam_member" "github_actions_wif_terraform" {
+  service_account_id = google_service_account.terraform_deployer.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_actions.name}/attribute.repository/${var.github_repo_terraform}"
+}
+
+# ──────────────────────────────────────────────
 # Outputs
 # ──────────────────────────────────────────────
 
@@ -336,4 +415,14 @@ output "prizes_bucket_url" {
 output "wif_provider_name" {
   description = "Full resource name of the WIF provider (use as GCP_WIF_PROVIDER GitHub secret)"
   value       = google_iam_workload_identity_pool_provider.github.name
+}
+
+output "terraform_deployer_service_account_email" {
+  description = "Email of the Terraform deployer service account"
+  value       = google_service_account.terraform_deployer.email
+}
+
+output "wif_provider_terraform_name" {
+  description = "Full resource name of the Terraform WIF provider (use as GCP_WIF_PROVIDER_TF GitHub secret)"
+  value       = google_iam_workload_identity_pool_provider.github_terraform.name
 }

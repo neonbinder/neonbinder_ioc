@@ -1,0 +1,88 @@
+name: Terraform
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set environment
+        run: |
+          REF="${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}"
+          if [ "$REF" = "main" ]; then
+            echo "ENV_NAME=prod" >> $GITHUB_ENV
+            echo "GCP_PROJECT=neonbinder" >> $GITHUB_ENV
+            echo "TF_VAR_FILE=environments/prod.tfvars" >> $GITHUB_ENV
+            echo "STATE_PREFIX=terraform/state/prod" >> $GITHUB_ENV
+          else
+            echo "ENV_NAME=dev" >> $GITHUB_ENV
+            echo "GCP_PROJECT=neonbinder-dev-io" >> $GITHUB_ENV
+            echo "TF_VAR_FILE=environments/dev.tfvars" >> $GITHUB_ENV
+            echo "STATE_PREFIX=terraform/state/dev" >> $GITHUB_ENV
+          fi
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.ENV_NAME == 'prod' && secrets.GCP_WIF_PROVIDER_TF || secrets.GCP_WIF_PROVIDER_TF_DEV }}
+          service_account: ${{ env.ENV_NAME == 'prod' && secrets.GCP_TF_SERVICE_ACCOUNT || secrets.GCP_TF_SERVICE_ACCOUNT_DEV }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.0"
+
+      - name: Terraform Init
+        run: terraform init -backend-config="prefix=${{ env.STATE_PREFIX }}"
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -var-file="${{ env.TF_VAR_FILE }}" -no-color -out=tfplan
+        continue-on-error: true
+
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `#### Terraform Plan (${{ env.ENV_NAME }}) \`${{ steps.plan.outcome }}\`
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`
+            ${{ steps.plan.outputs.stdout }}
+            \`\`\`
+
+            </details>
+
+            *Pushed by: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      - name: Fail on plan error
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      - name: Terraform Apply
+        if: github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'develop')
+        run: terraform apply -auto-approve tfplan

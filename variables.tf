@@ -67,6 +67,12 @@ variable "github_repo" {
   default     = "neonbinder/neonbinder_browser"
 }
 
+variable "github_repo_terraform" {
+  description = "GitHub repository (owner/repo) for Terraform CI/CD via WIF"
+  type        = string
+  default     = "neonbinder/neonbinder_terraform"
+}
+
 variable "wif_branch_ref" {
   description = "Git branch ref allowed for WIF authentication (e.g. refs/heads/main)"
   type        = string
