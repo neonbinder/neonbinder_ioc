@@ -114,17 +114,9 @@ resource "google_service_account" "convex" {
   description  = "Service account for the Convex backend (GCS, Secret Manager)"
 }
 
-resource "google_project_iam_member" "convex_secret_accessor" {
-  project = var.gcp_project_id
-  role    = "roles/secretmanager.secretAccessor"
-  member  = "serviceAccount:${google_service_account.convex.email}"
-}
-
-resource "google_project_iam_member" "convex_secret_version_manager" {
-  project = var.gcp_project_id
-  role    = "roles/secretmanager.secretVersionManager"
-  member  = "serviceAccount:${google_service_account.convex.email}"
-}
+# Note: Convex SA does not directly access Secret Manager.
+# Credential operations are proxied through the browser service via HTTP.
+# The Convex SA only needs GCS access (granted via bucket-level IAM below).
 
 # ──────────────────────────────────────────────
 # Developer SA impersonation — local dev access
