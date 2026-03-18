@@ -98,6 +98,50 @@ resource "google_service_account_iam_member" "deployer_act_as_runtime" {
 }
 
 # ──────────────────────────────────────────────
+# Convex Backend SA — used by Convex for GCS operations
+# ──────────────────────────────────────────────
+
+# Import note: this SA was created manually before Terraform.
+# Import with: terraform import google_service_account.convex projects/PROJECT_ID/serviceAccounts/neonbinder-convex@PROJECT_ID.iam.gserviceaccount.com
+resource "google_service_account" "convex" {
+  account_id   = "neonbinder-convex"
+  display_name = "NeonBinder Convex Backend"
+  description  = "Service account for the Convex backend (GCS, Secret Manager)"
+}
+
+resource "google_project_iam_member" "convex_secret_accessor" {
+  project = var.gcp_project_id
+  role    = "roles/secretmanager.secretAccessor"
+  member  = "serviceAccount:${google_service_account.convex.email}"
+}
+
+resource "google_project_iam_member" "convex_secret_version_manager" {
+  project = var.gcp_project_id
+  role    = "roles/secretmanager.secretVersionManager"
+  member  = "serviceAccount:${google_service_account.convex.email}"
+}
+
+# ──────────────────────────────────────────────
+# Developer SA impersonation — local dev access
+# ──────────────────────────────────────────────
+
+# Allow developers to impersonate the runtime SA (for local browser service dev)
+resource "google_service_account_iam_member" "developer_impersonate_runtime" {
+  for_each           = toset(var.developer_emails)
+  service_account_id = google_service_account.runtime.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "user:${each.value}"
+}
+
+# Allow developers to impersonate the convex SA (for local Convex/GCS dev)
+resource "google_service_account_iam_member" "developer_impersonate_convex" {
+  for_each           = toset(var.developer_emails)
+  service_account_id = google_service_account.convex.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "user:${each.value}"
+}
+
+# ──────────────────────────────────────────────
 # Secret Manager — INTERNAL_API_KEY
 # ──────────────────────────────────────────────
 
@@ -217,7 +261,7 @@ resource "google_storage_bucket_iam_member" "neonbinder_convex_prizes_admin" {
   count  = var.create_prizes_bucket ? 1 : 0
   bucket = google_storage_bucket.neonbinder_prizes[0].name
   role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:neonbinder-convex@${var.gcp_project_id}.iam.gserviceaccount.com"
+  member = "serviceAccount:${google_service_account.convex.email}"
 }
 
 # ──────────────────────────────────────────────
@@ -267,6 +311,11 @@ output "runtime_service_account_email" {
 output "deployer_service_account_email" {
   description = "Email of the deployer service account"
   value       = google_service_account.deployer.email
+}
+
+output "convex_service_account_email" {
+  description = "Email of the Convex backend service account"
+  value       = google_service_account.convex.email
 }
 
 output "cloud_run_url" {

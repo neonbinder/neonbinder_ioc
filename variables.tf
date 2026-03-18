@@ -2,7 +2,7 @@
 variable "gcp_project_id" {
   description = "GCP Project ID"
   type        = string
-  default     = "neonbinder-484017"
+  default     = "neonbinder"
 }
 
 variable "gcp_region" {
@@ -78,6 +78,13 @@ variable "create_prizes_bucket" {
   description = "Whether to create the prizes GCS bucket (prod only)"
   type        = bool
   default     = true
+}
+
+# Developer access
+variable "developer_emails" {
+  description = "List of developer emails allowed to impersonate service accounts for local dev"
+  type        = list(string)
+  default     = []
 }
 
 # Tags and Labels
