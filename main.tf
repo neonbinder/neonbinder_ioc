@@ -42,6 +42,9 @@ resource "google_service_account" "deployer" {
 # Runtime SA IAM — minimal permissions
 # ──────────────────────────────────────────────
 
+# Project-level secret access is required because the browser service dynamically
+# creates/reads/deletes user credential secrets (e.g. buysportscards-credentials-user_xxx)
+# that aren't known at Terraform plan time. Cannot be scoped to individual secrets.
 resource "google_project_iam_member" "runtime_secret_accessor" {
   project = var.gcp_project_id
   role    = "roles/secretmanager.secretAccessor"
@@ -316,9 +319,13 @@ resource "google_project_iam_member" "tf_deployer_sa_admin" {
   member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
 }
 
-resource "google_project_iam_member" "tf_deployer_iam_security_admin" {
+# projectIamAdmin allows managing project IAM bindings (needed for
+# google_project_iam_member resources). More scoped than iam.securityAdmin
+# which also grants org-level IAM and custom role management.
+# Risk is mitigated by WIF restricting this SA to the terraform repo + branch.
+resource "google_project_iam_member" "tf_deployer_project_iam_admin" {
   project = var.gcp_project_id
-  role    = "roles/iam.securityAdmin"
+  role    = "roles/resourcemanager.projectIamAdmin"
   member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
 }
 
@@ -346,10 +353,23 @@ resource "google_project_iam_member" "tf_deployer_wif_admin" {
   member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
 }
 
-resource "google_project_iam_member" "tf_deployer_sa_user" {
-  project = var.gcp_project_id
-  role    = "roles/iam.serviceAccountUser"
-  member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
+# Scoped to specific SAs instead of project-wide to prevent impersonating arbitrary SAs
+resource "google_service_account_iam_member" "tf_deployer_act_as_runtime" {
+  service_account_id = google_service_account.runtime.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+resource "google_service_account_iam_member" "tf_deployer_act_as_deployer" {
+  service_account_id = google_service_account.deployer.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+resource "google_service_account_iam_member" "tf_deployer_act_as_convex" {
+  service_account_id = google_service_account.convex.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.terraform_deployer.email}"
 }
 
 # WIF provider for the Terraform repo
