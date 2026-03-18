@@ -70,7 +70,7 @@ variable "github_repo" {
 variable "github_repo_terraform" {
   description = "GitHub repository (owner/repo) for Terraform CI/CD via WIF"
   type        = string
-  default     = "neonbinder/neonbinder_terraform"
+  default     = "neonbinder/neonbinder_ioc"
 }
 
 variable "wif_branch_ref" {
