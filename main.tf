@@ -42,18 +42,13 @@ resource "google_service_account" "deployer" {
 # Runtime SA IAM — minimal permissions
 # ──────────────────────────────────────────────
 
-# Project-level secret access is required because the browser service dynamically
-# creates/reads/deletes user credential secrets (e.g. buysportscards-credentials-user_xxx)
+# Project-level secret admin is required because the browser service dynamically
+# creates/reads/updates/deletes user credential secrets (e.g. buysportscards-credentials-user_xxx)
 # that aren't known at Terraform plan time. Cannot be scoped to individual secrets.
-resource "google_project_iam_member" "runtime_secret_accessor" {
+# Includes: secrets.create, secrets.delete, secrets.get, secretVersions.add, secretVersions.access
+resource "google_project_iam_member" "runtime_secret_admin" {
   project = var.gcp_project_id
-  role    = "roles/secretmanager.secretAccessor"
-  member  = "serviceAccount:${google_service_account.runtime.email}"
-}
-
-resource "google_project_iam_member" "runtime_secret_version_manager" {
-  project = var.gcp_project_id
-  role    = "roles/secretmanager.secretVersionManager"
+  role    = "roles/secretmanager.admin"
   member  = "serviceAccount:${google_service_account.runtime.email}"
 }
 
