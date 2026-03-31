@@ -195,6 +195,11 @@ resource "google_cloud_run_service" "neonbinder_browser" {
           name  = "ENVIRONMENT"
           value = var.environment
         }
+
+        env {
+          name  = "GOOGLE_CLOUD_PROJECT"
+          value = var.gcp_project_id
+        }
       }
 
       service_account_name = google_service_account.runtime.email
