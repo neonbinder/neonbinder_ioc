@@ -45,7 +45,7 @@ variable "cloud_run_cpu" {
 variable "cloud_run_memory" {
   description = "Memory allocation for Cloud Run service"
   type        = string
-  default     = "1Gi"
+  default     = "2Gi"
 }
 
 # GitHub Actions
