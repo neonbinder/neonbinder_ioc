@@ -341,6 +341,12 @@ resource "google_project_iam_member" "tf_deployer_storage_admin" {
   member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
 }
 
+resource "google_project_iam_member" "tf_deployer_artifactregistry_reader" {
+  project = var.gcp_project_id
+  role    = "roles/artifactregistry.reader"
+  member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
 resource "google_project_iam_member" "tf_deployer_wif_admin" {
   project = var.gcp_project_id
   role    = "roles/iam.workloadIdentityPoolAdmin"
