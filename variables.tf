@@ -61,6 +61,49 @@ variable "github_repo_terraform" {
   default     = "neonbinder/neonbinder_ioc"
 }
 
+variable "github_repo_preprocess" {
+  description = "GitHub repository (owner/repo) for the preprocess service CI/CD via WIF"
+  type        = string
+  default     = "neonbinder/neonbinder_preprocess"
+}
+
+# Preprocess Cloud Run configuration
+variable "preprocess_service_name" {
+  description = "Name for the preprocess Cloud Run service"
+  type        = string
+  default     = "neonbinder-preprocess"
+}
+
+variable "preprocess_image" {
+  description = "Docker image for the preprocess Cloud Run service (first-apply placeholder; CI manages image tags thereafter)"
+  type        = string
+  default     = "gcr.io/neonbinder/neonbinder-preprocess:latest"
+}
+
+variable "preprocess_cpu" {
+  description = "CPU allocation for the preprocess Cloud Run service"
+  type        = string
+  default     = "4000m"
+}
+
+variable "preprocess_memory" {
+  description = "Memory allocation for the preprocess Cloud Run service"
+  type        = string
+  default     = "4Gi"
+}
+
+variable "preprocess_container_concurrency" {
+  description = "Max concurrent requests per preprocess container"
+  type        = number
+  default     = 3
+}
+
+variable "preprocess_max_instances" {
+  description = "Max Cloud Run instances for the preprocess service"
+  type        = number
+  default     = 3
+}
+
 variable "wif_branch_ref" {
   description = "Git branch ref allowed for WIF authentication (e.g. refs/heads/main)"
   type        = string

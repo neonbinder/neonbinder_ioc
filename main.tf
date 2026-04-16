@@ -10,7 +10,7 @@ terraform {
 
   # GCS remote state — prefix set at init time via -backend-config="prefix=terraform/state/<env>"
   backend "gcs" {
-    bucket = "neonbinder-terraform-state"
+    bucket = "neonbinder-terraform-state-prod"
   }
 }
 
@@ -161,6 +161,15 @@ resource "google_secret_manager_secret_iam_member" "deployer_api_key_access" {
   member    = "serviceAccount:${google_service_account.deployer.email}"
 }
 
+# Browser runtime SA manages per-user marketplace credential secrets dynamically
+# (PUT/GET/DELETE /credentials/:key). Needs project-level admin to create secrets
+# it doesn't know about in advance.
+resource "google_project_iam_member" "runtime_secretmanager_admin" {
+  project = var.gcp_project_id
+  role    = "roles/secretmanager.admin"
+  member  = "serviceAccount:${google_service_account.runtime.email}"
+}
+
 # ──────────────────────────────────────────────
 # Cloud Run Service
 # ──────────────────────────────────────────────
@@ -246,7 +255,7 @@ resource "google_storage_bucket" "neonbinder_prizes" {
       type = "Delete"
     }
     condition {
-      age = 365  # Delete objects older than 1 year
+      age = 365 # Delete objects older than 1 year
     }
   }
 
@@ -430,6 +439,231 @@ resource "google_project_iam_audit_config" "secretmanager_audit" {
 }
 
 # ──────────────────────────────────────────────
+# Preprocess Service — Python/FastAPI image preprocessing on Cloud Run
+# ──────────────────────────────────────────────
+
+# Enable Cloud Vision API (used by /process for DOCUMENT_TEXT_DETECTION)
+resource "google_project_service" "vision_api" {
+  project            = var.gcp_project_id
+  service            = "vision.googleapis.com"
+  disable_on_destroy = false
+}
+
+# Runtime SA — attached to the preprocess Cloud Run service
+resource "google_service_account" "preprocess_runtime" {
+  account_id   = "neonbinder-preprocess-runtime"
+  display_name = "NeonBinder Preprocess Runtime"
+  description  = "Runtime service account for the preprocess Cloud Run service"
+}
+
+# Deployer SA — used by GitHub Actions via WIF to deploy the preprocess service
+resource "google_service_account" "preprocess_deployer" {
+  account_id   = "neonbinder-preprocess-deployer"
+  display_name = "NeonBinder Preprocess Deployer"
+  description  = "Deployer service account for preprocess GitHub Actions CI/CD"
+}
+
+resource "google_project_iam_member" "preprocess_runtime_logging_writer" {
+  project = var.gcp_project_id
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.preprocess_runtime.email}"
+}
+
+# Runtime SA uses its own ADC for Vision API calls — no API key needed.
+resource "google_cloud_run_service_iam_member" "preprocess_runtime_invoker" {
+  location = google_cloud_run_service.neonbinder_preprocess.location
+  service  = google_cloud_run_service.neonbinder_preprocess.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.preprocess_runtime.email}"
+}
+
+resource "google_project_iam_member" "preprocess_deployer_run_admin" {
+  project = var.gcp_project_id
+  role    = "roles/run.admin"
+  member  = "serviceAccount:${google_service_account.preprocess_deployer.email}"
+}
+
+resource "google_project_iam_member" "preprocess_deployer_artifactregistry_writer" {
+  project = var.gcp_project_id
+  role    = "roles/artifactregistry.writer"
+  member  = "serviceAccount:${google_service_account.preprocess_deployer.email}"
+}
+
+# Deployer needs objectAdmin to push/pull Docker images via GCR's backing GCS.
+resource "google_project_iam_member" "preprocess_deployer_storage_object_admin" {
+  project = var.gcp_project_id
+  role    = "roles/storage.objectAdmin"
+  member  = "serviceAccount:${google_service_account.preprocess_deployer.email}"
+}
+
+resource "google_service_account_iam_member" "preprocess_deployer_act_as_runtime" {
+  service_account_id = google_service_account.preprocess_runtime.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.preprocess_deployer.email}"
+}
+
+# Allow developers to impersonate the preprocess runtime SA (local dev parity)
+resource "google_service_account_iam_member" "developer_impersonate_preprocess_runtime" {
+  for_each           = toset(var.developer_emails)
+  service_account_id = google_service_account.preprocess_runtime.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "user:${each.value}"
+}
+
+# Preprocess service shares the internal-api-key (watcher sends the same header)
+resource "google_secret_manager_secret_iam_member" "preprocess_runtime_api_key_access" {
+  secret_id = google_secret_manager_secret.internal_api_key.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.preprocess_runtime.email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "preprocess_deployer_api_key_access" {
+  secret_id = google_secret_manager_secret.internal_api_key.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.preprocess_deployer.email}"
+}
+
+# Dedicated Anthropic API key for the preprocess service.
+# Secret VALUE must be populated out-of-band (gcloud secrets versions add) — Terraform only
+# manages the secret resource and IAM so the key never appears in state/tfvars.
+resource "google_secret_manager_secret" "anthropic_api_key" {
+  secret_id = "anthropic-api-key"
+
+  replication {
+    auto {}
+  }
+
+  labels = var.common_labels
+}
+
+resource "google_secret_manager_secret_iam_member" "preprocess_runtime_anthropic_access" {
+  secret_id = google_secret_manager_secret.anthropic_api_key.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.preprocess_runtime.email}"
+}
+
+# Cloud Run service — 4 CPU / 4Gi / concurrency=3 / max-instances=3 / scale-to-zero
+resource "google_cloud_run_service" "neonbinder_preprocess" {
+  name     = var.preprocess_service_name
+  location = var.gcp_region
+
+  template {
+    metadata {
+      annotations = {
+        "autoscaling.knative.dev/minScale" = "0"
+        "autoscaling.knative.dev/maxScale" = tostring(var.preprocess_max_instances)
+      }
+    }
+
+    spec {
+      container_concurrency = var.preprocess_container_concurrency
+      timeout_seconds       = 300
+      service_account_name  = google_service_account.preprocess_runtime.email
+
+      containers {
+        image = var.preprocess_image
+
+        resources {
+          limits = {
+            cpu    = var.preprocess_cpu
+            memory = var.preprocess_memory
+          }
+        }
+
+        env {
+          name = "INTERNAL_API_KEY"
+          value_from {
+            secret_key_ref {
+              name = google_secret_manager_secret.internal_api_key.secret_id
+              key  = "latest"
+            }
+          }
+        }
+
+        env {
+          name = "ANTHROPIC_API_KEY"
+          value_from {
+            secret_key_ref {
+              name = google_secret_manager_secret.anthropic_api_key.secret_id
+              key  = "latest"
+            }
+          }
+        }
+
+        env {
+          name  = "ENVIRONMENT"
+          value = var.environment
+        }
+
+        env {
+          name  = "GOOGLE_CLOUD_PROJECT"
+          value = var.gcp_project_id
+        }
+      }
+    }
+  }
+
+  traffic {
+    percent         = 100
+    latest_revision = true
+  }
+
+  depends_on = [google_project_service.vision_api]
+
+  lifecycle {
+    ignore_changes = [template[0].spec[0].containers[0].image]
+  }
+}
+
+# Public access gated by INTERNAL_API_KEY header check inside the service,
+# matching the browser service's pattern.
+resource "google_cloud_run_service_iam_member" "preprocess_public_access" {
+  location = google_cloud_run_service.neonbinder_preprocess.location
+  service  = google_cloud_run_service.neonbinder_preprocess.name
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}
+
+# WIF provider dedicated to the preprocess repo
+resource "google_iam_workload_identity_pool_provider" "github_preprocess" {
+  workload_identity_pool_id          = google_iam_workload_identity_pool.github_actions.workload_identity_pool_id
+  workload_identity_pool_provider_id = "github-preprocess"
+  display_name                       = "GitHub Preprocess"
+
+  attribute_mapping = {
+    "google.subject"       = "assertion.sub"
+    "attribute.repository" = "assertion.repository"
+    "attribute.ref"        = "assertion.ref"
+  }
+
+  attribute_condition = "assertion.repository == \"${var.github_repo_preprocess}\" && assertion.ref == \"${var.wif_branch_ref}\""
+
+  oidc {
+    issuer_uri = "https://token.actions.githubusercontent.com"
+  }
+}
+
+# Allow GitHub Actions (preprocess repo) to impersonate the preprocess deployer SA
+resource "google_service_account_iam_member" "github_actions_wif_preprocess" {
+  service_account_id = google_service_account.preprocess_deployer.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_actions.name}/attribute.repository/${var.github_repo_preprocess}"
+}
+
+# Allow the terraform-deployer SA to act as the preprocess SAs during apply
+resource "google_service_account_iam_member" "tf_deployer_act_as_preprocess_runtime" {
+  service_account_id = google_service_account.preprocess_runtime.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+resource "google_service_account_iam_member" "tf_deployer_act_as_preprocess_deployer" {
+  service_account_id = google_service_account.preprocess_deployer.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+# ──────────────────────────────────────────────
 # Outputs
 # ──────────────────────────────────────────────
 
@@ -476,4 +710,24 @@ output "terraform_deployer_service_account_email" {
 output "wif_provider_terraform_name" {
   description = "Full resource name of the Terraform WIF provider (use as GCP_WIF_PROVIDER_TF GitHub secret)"
   value       = google_iam_workload_identity_pool_provider.github_terraform.name
+}
+
+output "preprocess_runtime_service_account_email" {
+  description = "Email of the preprocess runtime service account"
+  value       = google_service_account.preprocess_runtime.email
+}
+
+output "preprocess_deployer_service_account_email" {
+  description = "Email of the preprocess deployer service account (set as GCP_SA_PREPROCESS_DEPLOYER[_DEV] GitHub secret)"
+  value       = google_service_account.preprocess_deployer.email
+}
+
+output "preprocess_cloud_run_url" {
+  description = "URL of the deployed preprocess Cloud Run service"
+  value       = google_cloud_run_service.neonbinder_preprocess.status[0].url
+}
+
+output "wif_provider_preprocess_name" {
+  description = "Full resource name of the preprocess WIF provider (set as GCP_WIF_PROVIDER_PREPROCESS[_DEV] GitHub secret)"
+  value       = google_iam_workload_identity_pool_provider.github_preprocess.name
 }
