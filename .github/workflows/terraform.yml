@@ -24,18 +24,18 @@ jobs:
           REF="${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}"
           if [ "$REF" = "main" ]; then
             echo "ENV_NAME=prod" >> $GITHUB_ENV
-            echo "GCP_PROJECT=neonbinder-484017" >> $GITHUB_ENV
+            echo "GCP_PROJECT=neonbinder" >> $GITHUB_ENV
             echo "TF_VAR_FILE=environments/prod.tfvars" >> $GITHUB_ENV
             echo "STATE_PREFIX=terraform/state/prod" >> $GITHUB_ENV
-            echo "WIF_PROVIDER=projects/211831470630/locations/global/workloadIdentityPools/github-actions/providers/github-terraform" >> $GITHUB_ENV
-            echo "TF_SERVICE_ACCOUNT=neonbinder-tf-deployer@neonbinder-484017.iam.gserviceaccount.com" >> $GITHUB_ENV
+            echo "WIF_PROVIDER=projects/117170654588/locations/global/workloadIdentityPools/github-actions/providers/github-terraform" >> $GITHUB_ENV
+            echo "TF_SERVICE_ACCOUNT=neonbinder-tf-deployer@neonbinder.iam.gserviceaccount.com" >> $GITHUB_ENV
           else
             echo "ENV_NAME=dev" >> $GITHUB_ENV
-            echo "GCP_PROJECT=neonbinder-dev-io" >> $GITHUB_ENV
+            echo "GCP_PROJECT=neonbinder-dev" >> $GITHUB_ENV
             echo "TF_VAR_FILE=environments/dev.tfvars" >> $GITHUB_ENV
             echo "STATE_PREFIX=terraform/state/dev" >> $GITHUB_ENV
-            echo "WIF_PROVIDER=projects/874494136386/locations/global/workloadIdentityPools/github-actions/providers/github-terraform" >> $GITHUB_ENV
-            echo "TF_SERVICE_ACCOUNT=neonbinder-tf-deployer@neonbinder-dev-io.iam.gserviceaccount.com" >> $GITHUB_ENV
+            echo "WIF_PROVIDER=projects/339836466983/locations/global/workloadIdentityPools/github-actions/providers/github-terraform" >> $GITHUB_ENV
+            echo "TF_SERVICE_ACCOUNT=neonbinder-tf-deployer@neonbinder-dev.iam.gserviceaccount.com" >> $GITHUB_ENV
           fi
 
       - id: auth
