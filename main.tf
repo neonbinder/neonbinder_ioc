@@ -98,6 +98,31 @@ resource "google_service_account_iam_member" "deployer_act_as_runtime" {
 }
 
 # ──────────────────────────────────────────────
+# Artifact Registry — gcr.io-compatible Docker registry
+# ──────────────────────────────────────────────
+
+# Prod has this pre-existing from Google's GCR-to-AR migration; dev's was
+# manually created on 2026-04-16 when CI needed it for its first Docker push.
+# Both are now tracked by Terraform.
+resource "google_artifact_registry_repository" "gcr_io" {
+  project       = var.gcp_project_id
+  location      = "us"
+  repository_id = "gcr.io"
+  format        = "DOCKER"
+  description   = "Legacy gcr.io-compatible Docker image registry"
+}
+
+# createOnPushWriter lets the browser deployer push to a repo path that doesn't
+# exist yet (the AR repo is static here, but the <image> path inside can be new).
+resource "google_artifact_registry_repository_iam_member" "deployer_create_on_push" {
+  project    = var.gcp_project_id
+  location   = google_artifact_registry_repository.gcr_io.location
+  repository = google_artifact_registry_repository.gcr_io.name
+  role       = "roles/artifactregistry.createOnPushWriter"
+  member     = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+# ──────────────────────────────────────────────
 # Convex Backend SA — used by Convex for GCS operations
 # ──────────────────────────────────────────────
 
@@ -362,6 +387,24 @@ resource "google_project_iam_member" "tf_deployer_wif_admin" {
   member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
 }
 
+# Needed so terraform plan can read `google_project_service` state (which APIs
+# are enabled) and apply changes to enablement.
+resource "google_project_iam_member" "tf_deployer_serviceusage_admin" {
+  project = var.gcp_project_id
+  role    = "roles/serviceusage.serviceUsageAdmin"
+  member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+# Cross-project state bucket access: dev CI uses the prod-hosted state bucket.
+# This runs only in the env whose project owns the bucket (prod) and grants
+# other envs' tf-deployer SAs read/write on it.
+resource "google_storage_bucket_iam_member" "cross_env_tf_deployer_state_access" {
+  for_each = toset(var.cross_env_tf_deployer_emails)
+  bucket   = var.terraform_state_bucket
+  role     = "roles/storage.objectAdmin"
+  member   = "serviceAccount:${each.value}"
+}
+
 # Scoped to specific SAs instead of project-wide to prevent impersonating arbitrary SAs
 resource "google_service_account_iam_member" "tf_deployer_act_as_runtime" {
   service_account_id = google_service_account.runtime.name
@@ -494,6 +537,16 @@ resource "google_project_iam_member" "preprocess_deployer_storage_object_admin" 
   project = var.gcp_project_id
   role    = "roles/storage.objectAdmin"
   member  = "serviceAccount:${google_service_account.preprocess_deployer.email}"
+}
+
+# createOnPushWriter lets the preprocess deployer push to a repo path that
+# doesn't exist yet on first deploy.
+resource "google_artifact_registry_repository_iam_member" "preprocess_deployer_create_on_push" {
+  project    = var.gcp_project_id
+  location   = google_artifact_registry_repository.gcr_io.location
+  repository = google_artifact_registry_repository.gcr_io.name
+  role       = "roles/artifactregistry.createOnPushWriter"
+  member     = "serviceAccount:${google_service_account.preprocess_deployer.email}"
 }
 
 resource "google_service_account_iam_member" "preprocess_deployer_act_as_runtime" {

@@ -117,6 +117,18 @@ variable "create_prizes_bucket" {
   default     = true
 }
 
+variable "cross_env_tf_deployer_emails" {
+  description = "TF-deployer SA emails from OTHER environments that need access to this environment's shared state bucket. Set in prod.tfvars to grant the dev tf-deployer access to the prod-hosted state bucket; empty in dev."
+  type        = list(string)
+  default     = []
+}
+
+variable "terraform_state_bucket" {
+  description = "GCS bucket holding Terraform state. Lives in prod; dev's tf-deployer needs cross-project access."
+  type        = string
+  default     = "neonbinder-terraform-state-prod"
+}
+
 # Developer access
 variable "developer_emails" {
   description = "List of developer emails allowed to impersonate service accounts for local dev"
