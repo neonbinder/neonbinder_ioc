@@ -1,0 +1,94 @@
+name: Terraform
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set environment
+        run: |
+          REF="${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}"
+          if [ "$REF" = "main" ]; then
+            echo "ENV_NAME=prod" >> $GITHUB_ENV
+            echo "GCP_PROJECT=neonbinder" >> $GITHUB_ENV
+            echo "TF_VAR_FILE=environments/prod.tfvars" >> $GITHUB_ENV
+            echo "STATE_PREFIX=terraform/state/prod" >> $GITHUB_ENV
+            echo "WIF_PROVIDER=projects/117170654588/locations/global/workloadIdentityPools/github-actions/providers/github-terraform" >> $GITHUB_ENV
+            echo "TF_SERVICE_ACCOUNT=neonbinder-tf-deployer@neonbinder.iam.gserviceaccount.com" >> $GITHUB_ENV
+          else
+            echo "ENV_NAME=dev" >> $GITHUB_ENV
+            echo "GCP_PROJECT=neonbinder-dev" >> $GITHUB_ENV
+            echo "TF_VAR_FILE=environments/dev.tfvars" >> $GITHUB_ENV
+            echo "STATE_PREFIX=terraform/state/dev" >> $GITHUB_ENV
+            echo "WIF_PROVIDER=projects/339836466983/locations/global/workloadIdentityPools/github-actions/providers/github-terraform" >> $GITHUB_ENV
+            echo "TF_SERVICE_ACCOUNT=neonbinder-tf-deployer@neonbinder-dev.iam.gserviceaccount.com" >> $GITHUB_ENV
+          fi
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.TF_SERVICE_ACCOUNT }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.0"
+
+      - name: Terraform Init
+        run: terraform init -backend-config="prefix=${{ env.STATE_PREFIX }}"
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -var-file="${{ env.TF_VAR_FILE }}" -no-color -out=tfplan 2>&1 | tee tfplan.txt
+        continue-on-error: true
+
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('tfplan.txt', 'utf8').substring(0, 60000);
+            const body = `#### Terraform Plan (${{ env.ENV_NAME }}) \`${{ steps.plan.outcome }}\`
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`
+            ${plan}
+            \`\`\`
+
+            </details>
+
+            *Pushed by: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      - name: Fail on plan error
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      - name: Terraform Apply
+        if: github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'develop')
+        run: terraform apply -auto-approve tfplan
