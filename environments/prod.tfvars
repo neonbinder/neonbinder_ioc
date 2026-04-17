@@ -5,6 +5,9 @@ cloud_run_image        = "gcr.io/neonbinder/neonbinder-browser:latest"
 preprocess_image       = "gcr.io/neonbinder/neonbinder-preprocess:latest"
 create_prizes_bucket   = true
 wif_branch_ref         = "refs/heads/main"
+cross_env_tf_deployer_emails = [
+  "neonbinder-tf-deployer@neonbinder-dev.iam.gserviceaccount.com",
+]
 common_labels = {
   project     = "neonbinder"
   environment = "production"
