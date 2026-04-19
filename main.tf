@@ -246,7 +246,14 @@ resource "google_cloud_run_service" "neonbinder_browser" {
   }
 
   lifecycle {
-    ignore_changes = [template[0].spec[0].containers[0].image]
+    # `traffic` is owned by the deploy workflow: dev pins the new revision
+    # at 100% on push; prod's blue/green gate carves out tagged no-traffic
+    # PR previews + a tagged no-traffic prod candidate. Terraform flipping
+    # back to latest_revision=true on every plan would fight both.
+    ignore_changes = [
+      template[0].spec[0].containers[0].image,
+      traffic,
+    ]
   }
 }
 
@@ -314,9 +321,16 @@ resource "google_iam_workload_identity_pool_provider" "github" {
     "google.subject"       = "assertion.sub"
     "attribute.repository" = "assertion.repository"
     "attribute.ref"        = "assertion.ref"
+    "attribute.event_name" = "assertion.event_name"
   }
 
-  attribute_condition = "assertion.repository == \"${var.github_repo}\" && assertion.ref == \"${var.wif_branch_ref}\""
+  # When browser_wif_allow_pull_requests is true (dev), also accept
+  # pull_request OIDC tokens (ref == refs/pull/<N>/merge). This lets the
+  # neonbinder_browser repo deploy per-PR Cloud Run previews to the dev
+  # project. Prod keeps the tight push-to-main-only condition. Workflow-
+  # level guards (head.repo.full_name == github.repository) still prevent
+  # fork-originated previews from acquiring this token.
+  attribute_condition = var.browser_wif_allow_pull_requests ? "assertion.repository == \"${var.github_repo}\" && (assertion.ref == \"${var.wif_branch_ref}\" || assertion.event_name == \"pull_request\")" : "assertion.repository == \"${var.github_repo}\" && assertion.ref == \"${var.wif_branch_ref}\""
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
@@ -375,9 +389,14 @@ resource "google_project_iam_member" "tf_deployer_storage_admin" {
   member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
 }
 
-resource "google_project_iam_member" "tf_deployer_artifactregistry_reader" {
+resource "google_project_iam_member" "tf_deployer_artifactregistry_admin" {
+  # `admin` (vs `reader`) is required so terraform can read and modify IAM
+  # policy on individual AR repositories (e.g. the `gcr.io` repo's
+  # `createOnPushWriter` binding for the browser deployer). Observed:
+  # push-to-develop applies failing on
+  # `artifactregistry.repositories.getIamPolicy denied`.
   project = var.gcp_project_id
-  role    = "roles/artifactregistry.reader"
+  role    = "roles/artifactregistry.admin"
   member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
 }
 
@@ -424,7 +443,10 @@ resource "google_service_account_iam_member" "tf_deployer_act_as_convex" {
   member             = "serviceAccount:${google_service_account.terraform_deployer.email}"
 }
 
-# WIF provider for the Terraform repo
+# WIF provider for the Terraform repo. Accepts both push-to-wif_branch_ref
+# (applies) and any pull_request event from the terraform repo (plans). The
+# workflow is specifically designed around `plan on PR` + `apply on push`;
+# rejecting PR tokens here leaves the plan step permanently broken.
 resource "google_iam_workload_identity_pool_provider" "github_terraform" {
   workload_identity_pool_id          = google_iam_workload_identity_pool.github_actions.workload_identity_pool_id
   workload_identity_pool_provider_id = "github-terraform"
@@ -434,9 +456,10 @@ resource "google_iam_workload_identity_pool_provider" "github_terraform" {
     "google.subject"       = "assertion.sub"
     "attribute.repository" = "assertion.repository"
     "attribute.ref"        = "assertion.ref"
+    "attribute.event_name" = "assertion.event_name"
   }
 
-  attribute_condition = "assertion.repository == \"${var.github_repo_terraform}\" && assertion.ref == \"${var.wif_branch_ref}\""
+  attribute_condition = "assertion.repository == \"${var.github_repo_terraform}\" && (assertion.ref == \"${var.wif_branch_ref}\" || assertion.event_name == \"pull_request\")"
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
@@ -664,7 +687,17 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
   depends_on = [google_project_service.vision_api]
 
   lifecycle {
-    ignore_changes = [template[0].spec[0].containers[0].image]
+    # See `neonbinder_browser.lifecycle`: the deploy workflow owns traffic.
+    # The client-name/client-version annotations are auto-set by gcloud on
+    # every deploy and show as drift on the next terraform plan; ignoring
+    # only those specific keys keeps terraform in control of minScale/
+    # maxScale but stops the churn.
+    ignore_changes = [
+      template[0].spec[0].containers[0].image,
+      traffic,
+      template[0].metadata[0].annotations["run.googleapis.com/client-name"],
+      template[0].metadata[0].annotations["run.googleapis.com/client-version"],
+    ]
   }
 }
 

@@ -110,6 +110,12 @@ variable "wif_branch_ref" {
   default     = "refs/heads/main"
 }
 
+variable "browser_wif_allow_pull_requests" {
+  description = "If true, the neonbinder_browser WIF provider also accepts pull_request OIDC tokens (in addition to push to wif_branch_ref). Enable in dev so per-PR preview deployments can authenticate; keep disabled in prod. Workflow-level guards must still restrict PR previews to same-repo branches."
+  type        = bool
+  default     = false
+}
+
 # Conditional resources
 variable "create_prizes_bucket" {
   description = "Whether to create the prizes GCS bucket (prod only)"
