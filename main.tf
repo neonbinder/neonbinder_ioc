@@ -246,7 +246,14 @@ resource "google_cloud_run_service" "neonbinder_browser" {
   }
 
   lifecycle {
-    ignore_changes = [template[0].spec[0].containers[0].image]
+    # `traffic` is owned by the deploy workflow: dev pins the new revision
+    # at 100% on push; prod's blue/green gate carves out tagged no-traffic
+    # PR previews + a tagged no-traffic prod candidate. Terraform flipping
+    # back to latest_revision=true on every plan would fight both.
+    ignore_changes = [
+      template[0].spec[0].containers[0].image,
+      traffic,
+    ]
   }
 }
 
@@ -680,7 +687,17 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
   depends_on = [google_project_service.vision_api]
 
   lifecycle {
-    ignore_changes = [template[0].spec[0].containers[0].image]
+    # See `neonbinder_browser.lifecycle`: the deploy workflow owns traffic.
+    # The client-name/client-version annotations are auto-set by gcloud on
+    # every deploy and show as drift on the next terraform plan; ignoring
+    # only those specific keys keeps terraform in control of minScale/
+    # maxScale but stops the churn.
+    ignore_changes = [
+      template[0].spec[0].containers[0].image,
+      traffic,
+      template[0].metadata[0].annotations["run.googleapis.com/client-name"],
+      template[0].metadata[0].annotations["run.googleapis.com/client-version"],
+    ]
   }
 }
 
