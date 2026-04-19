@@ -122,6 +122,18 @@ variable "browser_wif_allow_pull_requests" {
   default     = false
 }
 
+variable "preprocess_wif_branch_ref" {
+  description = "Git branch ref allowed for WIF authentication on the preprocess WIF provider. Always `refs/heads/main` in both envs because the preprocess repo is trunk-based (like the browser repo): a single push-to-main workflow auths to dev WIF (build+push to dev GCR + deploy-dev) and then prod WIF (retag/push + blue/green deploy-prod)."
+  type        = string
+  default     = "refs/heads/main"
+}
+
+variable "preprocess_wif_allow_pull_requests" {
+  description = "If true, the preprocess WIF provider also accepts pull_request OIDC tokens (in addition to push to preprocess_wif_branch_ref). Enable in dev so per-PR preview deployments can authenticate; keep disabled in prod. Workflow-level guards must still restrict PR previews to same-repo branches."
+  type        = bool
+  default     = false
+}
+
 # Conditional resources
 variable "create_prizes_bucket" {
   description = "Whether to create the prizes GCS bucket (prod only)"

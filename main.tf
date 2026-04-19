@@ -726,9 +726,17 @@ resource "google_iam_workload_identity_pool_provider" "github_preprocess" {
     "google.subject"       = "assertion.sub"
     "attribute.repository" = "assertion.repository"
     "attribute.ref"        = "assertion.ref"
+    "attribute.event_name" = "assertion.event_name"
   }
 
-  attribute_condition = "assertion.repository == \"${var.github_repo_preprocess}\" && assertion.ref == \"${var.wif_branch_ref}\""
+  # Preprocess repo is trunk-based: `preprocess_wif_branch_ref` is
+  # `refs/heads/main` in both envs. When preprocess_wif_allow_pull_requests
+  # is true (dev), also accept pull_request OIDC tokens (ref ==
+  # refs/pull/<N>/merge) so per-PR Cloud Run previews can deploy. Prod keeps
+  # the tight push-to-main-only condition. Workflow-level guards
+  # (head.repo.full_name == github.repository) still prevent fork-originated
+  # previews from acquiring this token. Mirrors the browser provider above.
+  attribute_condition = var.preprocess_wif_allow_pull_requests ? "assertion.repository == \"${var.github_repo_preprocess}\" && (assertion.ref == \"${var.preprocess_wif_branch_ref}\" || assertion.event_name == \"pull_request\")" : "assertion.repository == \"${var.github_repo_preprocess}\" && assertion.ref == \"${var.preprocess_wif_branch_ref}\""
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
