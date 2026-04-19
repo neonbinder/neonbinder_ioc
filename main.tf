@@ -382,9 +382,14 @@ resource "google_project_iam_member" "tf_deployer_storage_admin" {
   member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
 }
 
-resource "google_project_iam_member" "tf_deployer_artifactregistry_reader" {
+resource "google_project_iam_member" "tf_deployer_artifactregistry_admin" {
+  # `admin` (vs `reader`) is required so terraform can read and modify IAM
+  # policy on individual AR repositories (e.g. the `gcr.io` repo's
+  # `createOnPushWriter` binding for the browser deployer). Observed:
+  # push-to-develop applies failing on
+  # `artifactregistry.repositories.getIamPolicy denied`.
   project = var.gcp_project_id
-  role    = "roles/artifactregistry.reader"
+  role    = "roles/artifactregistry.admin"
   member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
 }
 
@@ -431,7 +436,10 @@ resource "google_service_account_iam_member" "tf_deployer_act_as_convex" {
   member             = "serviceAccount:${google_service_account.terraform_deployer.email}"
 }
 
-# WIF provider for the Terraform repo
+# WIF provider for the Terraform repo. Accepts both push-to-wif_branch_ref
+# (applies) and any pull_request event from the terraform repo (plans). The
+# workflow is specifically designed around `plan on PR` + `apply on push`;
+# rejecting PR tokens here leaves the plan step permanently broken.
 resource "google_iam_workload_identity_pool_provider" "github_terraform" {
   workload_identity_pool_id          = google_iam_workload_identity_pool.github_actions.workload_identity_pool_id
   workload_identity_pool_provider_id = "github-terraform"
@@ -441,9 +449,10 @@ resource "google_iam_workload_identity_pool_provider" "github_terraform" {
     "google.subject"       = "assertion.sub"
     "attribute.repository" = "assertion.repository"
     "attribute.ref"        = "assertion.ref"
+    "attribute.event_name" = "assertion.event_name"
   }
 
-  attribute_condition = "assertion.repository == \"${var.github_repo_terraform}\" && assertion.ref == \"${var.wif_branch_ref}\""
+  attribute_condition = "assertion.repository == \"${var.github_repo_terraform}\" && (assertion.ref == \"${var.wif_branch_ref}\" || assertion.event_name == \"pull_request\")"
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
