@@ -697,6 +697,9 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
       traffic,
       template[0].metadata[0].annotations["run.googleapis.com/client-name"],
       template[0].metadata[0].annotations["run.googleapis.com/client-version"],
+      # Knative auto-sets a per-revision nonce label; terraform doesn't
+      # manage any labels on this template, so ignore the whole map.
+      template[0].metadata[0].labels,
     ]
   }
 }
