@@ -105,7 +105,13 @@ variable "preprocess_max_instances" {
 }
 
 variable "wif_branch_ref" {
-  description = "Git branch ref allowed for WIF authentication (e.g. refs/heads/main)"
+  description = "Git branch ref allowed for WIF authentication on the terraform + preprocess providers (e.g. refs/heads/main). Set per-env: refs/heads/develop in dev, refs/heads/main in prod. The browser provider uses its own `browser_wif_branch_ref` because the browser repo is trunk-based — main is the only deploy ref regardless of env."
+  type        = string
+  default     = "refs/heads/main"
+}
+
+variable "browser_wif_branch_ref" {
+  description = "Git branch ref allowed for WIF authentication on the browser WIF provider. Always `refs/heads/main` in both envs because the browser repo is trunk-based: the same push-to-main workflow auths to dev WIF (build-push pushes to dev GCR + deploy-dev) and then prod WIF (retag/push + blue/green deploy-prod)."
   type        = string
   default     = "refs/heads/main"
 }

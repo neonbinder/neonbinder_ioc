@@ -324,13 +324,16 @@ resource "google_iam_workload_identity_pool_provider" "github" {
     "attribute.event_name" = "assertion.event_name"
   }
 
+  # Browser repo is trunk-based: `browser_wif_branch_ref` is
+  # `refs/heads/main` in both envs, separate from the terraform+preprocess
+  # providers' `wif_branch_ref` which still rides dev's `develop` branch.
   # When browser_wif_allow_pull_requests is true (dev), also accept
-  # pull_request OIDC tokens (ref == refs/pull/<N>/merge). This lets the
-  # neonbinder_browser repo deploy per-PR Cloud Run previews to the dev
-  # project. Prod keeps the tight push-to-main-only condition. Workflow-
-  # level guards (head.repo.full_name == github.repository) still prevent
-  # fork-originated previews from acquiring this token.
-  attribute_condition = var.browser_wif_allow_pull_requests ? "assertion.repository == \"${var.github_repo}\" && (assertion.ref == \"${var.wif_branch_ref}\" || assertion.event_name == \"pull_request\")" : "assertion.repository == \"${var.github_repo}\" && assertion.ref == \"${var.wif_branch_ref}\""
+  # pull_request OIDC tokens (ref == refs/pull/<N>/merge) so per-PR Cloud
+  # Run previews can deploy. Prod keeps the tight push-to-main-only
+  # condition. Workflow-level guards
+  # (head.repo.full_name == github.repository) still prevent fork-
+  # originated previews from acquiring this token.
+  attribute_condition = var.browser_wif_allow_pull_requests ? "assertion.repository == \"${var.github_repo}\" && (assertion.ref == \"${var.browser_wif_branch_ref}\" || assertion.event_name == \"pull_request\")" : "assertion.repository == \"${var.github_repo}\" && assertion.ref == \"${var.browser_wif_branch_ref}\""
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
