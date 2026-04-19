@@ -5,8 +5,10 @@ cloud_run_image        = "gcr.io/neonbinder-dev/neonbinder-browser:latest"
 preprocess_image       = "gcr.io/neonbinder-dev/neonbinder-preprocess:latest"
 create_prizes_bucket   = false
 wif_branch_ref         = "refs/heads/develop"
-# Dev-only: accept PR OIDC tokens so per-PR browser previews can deploy.
-browser_wif_allow_pull_requests = true
+# Dev-only: accept PR OIDC tokens so per-PR browser + preprocess previews can
+# deploy. Keep disabled in prod (default false).
+browser_wif_allow_pull_requests    = true
+preprocess_wif_allow_pull_requests = true
 developer_emails = [
   "neonbinder@neonbinder.io",
 ]
