@@ -141,6 +141,12 @@ variable "create_prizes_bucket" {
   default     = true
 }
 
+variable "create_preprocess_fixtures_bucket" {
+  description = "Whether to create the preprocess test-fixture GCS bucket (dev only). Test images for `neonbinder_preprocess` integration tests live here — too large to commit to git. Not needed in prod."
+  type        = bool
+  default     = false
+}
+
 variable "cross_env_tf_deployer_emails" {
   description = "TF-deployer SA emails from OTHER environments that need access to this environment's shared state bucket. Set in prod.tfvars to grant the dev tf-deployer access to the prod-hosted state bucket; empty in dev."
   type        = list(string)

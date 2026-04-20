@@ -764,6 +764,67 @@ resource "google_service_account_iam_member" "tf_deployer_act_as_preprocess_depl
 }
 
 # ──────────────────────────────────────────────
+# Preprocess test-fixture bucket — dev only
+# ──────────────────────────────────────────────
+# Home for the real-card integration-test fixtures that are too large to
+# commit to git (phone-camera shots at 22-26 MB each). Only the YAML
+# expectation sidecars live in the preprocess repo; images live here and
+# are fetched on demand via `scripts/fetch_fixtures.py`. No prod mirror:
+# these are test data that dev services consume during integration runs.
+
+resource "google_storage_bucket" "preprocess_fixtures" {
+  count    = var.create_preprocess_fixtures_bucket ? 1 : 0
+  name     = "neonbinder-dev-preprocess-fixtures"
+  location = var.gcp_region
+
+  uniform_bucket_level_access = true
+
+  versioning {
+    # Keep a history of fixture versions so a test regression can be traced
+    # to an image replacement.
+    enabled = true
+  }
+
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      # Prune old non-current versions at 1 year; live objects retained forever.
+      age                = 365
+      with_state         = "ARCHIVED"
+      num_newer_versions = 3
+    }
+  }
+
+  labels = var.common_labels
+}
+
+# Developers upload + fetch fixtures. objectAdmin gives read/write/delete.
+resource "google_storage_bucket_iam_member" "preprocess_fixtures_developer_admin" {
+  for_each = var.create_preprocess_fixtures_bucket ? toset(var.developer_emails) : toset([])
+  bucket   = google_storage_bucket.preprocess_fixtures[0].name
+  role     = "roles/storage.objectAdmin"
+  member   = "user:${each.value}"
+}
+
+# Preprocess runtime + deployer SAs can read fixtures so a future CI
+# integration-test job can fetch them before running pytest tests/integration.
+resource "google_storage_bucket_iam_member" "preprocess_fixtures_runtime_reader" {
+  count  = var.create_preprocess_fixtures_bucket ? 1 : 0
+  bucket = google_storage_bucket.preprocess_fixtures[0].name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.preprocess_runtime.email}"
+}
+
+resource "google_storage_bucket_iam_member" "preprocess_fixtures_deployer_reader" {
+  count  = var.create_preprocess_fixtures_bucket ? 1 : 0
+  bucket = google_storage_bucket.preprocess_fixtures[0].name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.preprocess_deployer.email}"
+}
+
+# ──────────────────────────────────────────────
 # Outputs
 # ──────────────────────────────────────────────
 
