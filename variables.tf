@@ -39,13 +39,19 @@ variable "cloud_run_image" {
 variable "cloud_run_cpu" {
   description = "CPU allocation for Cloud Run service"
   type        = string
-  default     = "1000m"
+  default     = "2000m"
 }
 
 variable "cloud_run_memory" {
   description = "Memory allocation for Cloud Run service"
   type        = string
-  default     = "2Gi"
+  default     = "4Gi"
+}
+
+variable "cloud_run_container_concurrency" {
+  description = "Max concurrent requests per browser container. Puppeteer spawns one Chromium process per request; keep low to bound per-instance memory."
+  type        = number
+  default     = 3
 }
 
 # GitHub Actions
