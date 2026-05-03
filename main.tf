@@ -205,6 +205,8 @@ resource "google_cloud_run_service" "neonbinder_browser" {
 
   template {
     spec {
+      container_concurrency = var.cloud_run_container_concurrency
+
       containers {
         image = var.cloud_run_image
 
