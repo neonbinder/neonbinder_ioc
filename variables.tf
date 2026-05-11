@@ -54,6 +54,18 @@ variable "cloud_run_container_concurrency" {
   default     = 3
 }
 
+variable "cloud_run_min_instances" {
+  description = "Minimum warm instances for the browser service. Set to 1 in both dev and prod to eliminate Puppeteer/Chromium cold-start (a recurring source of 30–60s latency in BSC token fetches and the variantType auto-sync). Costs ~$10/mo per environment to keep one 4Gi/2CPU instance warm."
+  type        = number
+  default     = 1
+}
+
+variable "cloud_run_max_instances" {
+  description = "Maximum Cloud Run instances for the browser service. Capped to bound memory/cost during traffic bursts; raise if legitimate concurrency exceeds this."
+  type        = number
+  default     = 20
+}
+
 # GitHub Actions
 variable "github_repo" {
   description = "GitHub repository (owner/repo) allowed to authenticate via WIF"

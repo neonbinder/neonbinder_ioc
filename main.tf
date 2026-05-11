@@ -204,6 +204,18 @@ resource "google_cloud_run_service" "neonbinder_browser" {
   location = var.gcp_region
 
   template {
+    metadata {
+      annotations = {
+        # minScale=1 keeps one warm Puppeteer-Chromium container alive at
+        # all times. Without it, every cold call (BSC token fetch, marketplace
+        # scrape) pays a 5–15s container boot, which cascades into the 60s+
+        # variantType-sync test failures tracked in NEO-12. The tradeoff is
+        # ~$10/mo per environment to keep one 4Gi/2CPU container warm.
+        "autoscaling.knative.dev/minScale" = tostring(var.cloud_run_min_instances)
+        "autoscaling.knative.dev/maxScale" = tostring(var.cloud_run_max_instances)
+      }
+    }
+
     spec {
       container_concurrency = var.cloud_run_container_concurrency
 
@@ -252,9 +264,18 @@ resource "google_cloud_run_service" "neonbinder_browser" {
     # at 100% on push; prod's blue/green gate carves out tagged no-traffic
     # PR previews + a tagged no-traffic prod candidate. Terraform flipping
     # back to latest_revision=true on every plan would fight both.
+    # The client-name/client-version annotations are auto-set by gcloud on
+    # every deploy and show as drift on the next plan; ignoring only those
+    # specific keys keeps terraform in control of minScale/maxScale but
+    # stops the churn (mirrors the preprocess service's pattern below).
     ignore_changes = [
       template[0].spec[0].containers[0].image,
       traffic,
+      template[0].metadata[0].annotations["run.googleapis.com/client-name"],
+      template[0].metadata[0].annotations["run.googleapis.com/client-version"],
+      # Knative auto-sets a per-revision nonce label; terraform doesn't
+      # manage any labels on this template, so ignore the whole map.
+      template[0].metadata[0].labels,
     ]
   }
 }
