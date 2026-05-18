@@ -283,11 +283,28 @@ resource "google_cloud_run_service" "neonbinder_browser" {
 # Allow unauthenticated access to Cloud Run.
 # Convex cannot perform GCP IAM auth, so we rely on the INTERNAL_API_KEY header
 # (validated with timing-safe comparison + rate limiting) for authentication.
+#
+# NEO-20 step 1: granting the Convex SA invoker is additive — it lives
+# alongside the allUsers grant for now. A follow-up PR removes allUsers
+# (and the INTERNAL_API_KEY env wiring) after the web + browser services
+# have shipped their OIDC-token + IAM-only changes.
 resource "google_cloud_run_service_iam_member" "public_access" {
   location = google_cloud_run_service.neonbinder_browser.location
   service  = google_cloud_run_service.neonbinder_browser.name
   role     = "roles/run.invoker"
   member   = "allUsers"
+}
+
+# NEO-20 step 1: pre-grant roles/run.invoker to the neonbinder-convex SA so
+# Convex can start authenticating to the browser service with an OIDC ID
+# token (audience = Cloud Run service URL) before allUsers is removed. This
+# resource is intentionally additive — applying it alone causes zero behavior
+# change because allUsers still has the same role.
+resource "google_cloud_run_service_iam_member" "convex_invoker" {
+  location = google_cloud_run_service.neonbinder_browser.location
+  service  = google_cloud_run_service.neonbinder_browser.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.convex.email}"
 }
 
 # ──────────────────────────────────────────────
