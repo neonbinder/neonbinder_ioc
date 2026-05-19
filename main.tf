@@ -279,6 +279,15 @@ resource "google_cloud_run_service" "neonbinder_browser" {
       template[0].spec[0].containers[0].resources,
       template[0].metadata[0].annotations["autoscaling.knative.dev/minScale"],
       template[0].metadata[0].annotations["autoscaling.knative.dev/maxScale"],
+      # NEO-20: the live container still carries the now-unused
+      # INTERNAL_API_KEY env binding (the deploy workflow propagates it on
+      # every revision via the previous main.tf). Code in the browser
+      # service no longer reads the value; it is dead weight. Removing it
+      # via terraform triggers the same 409 revision-naming conflict as
+      # other in-place spec edits, so we let it bleed out of live state
+      # naturally on the next deploy that doesn't re-add it. Ignore env
+      # changes here so future plans stay quiet.
+      template[0].spec[0].containers[0].env,
     ]
   }
 }
