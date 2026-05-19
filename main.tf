@@ -276,6 +276,16 @@ resource "google_cloud_run_service" "neonbinder_browser" {
       # Knative auto-sets a per-revision nonce label; terraform doesn't
       # manage any labels on this template, so ignore the whole map.
       template[0].metadata[0].labels,
+      # The deploy workflow (gcloud run deploy) re-asserts these on every
+      # push and normalizes the cpu format from "2000m" → "2". Without
+      # ignoring them, every terraform apply attempts to flip them back
+      # and Cloud Run rejects the resulting revision update with 409
+      # ("Revision named <NNN-XXX> with different configuration already
+      # exists"). The cloudbuild workflow is the source of truth for these
+      # values — terraform should not race the deploy.
+      template[0].spec[0].containers[0].resources,
+      template[0].metadata[0].annotations["autoscaling.knative.dev/minScale"],
+      template[0].metadata[0].annotations["autoscaling.knative.dev/maxScale"],
     ]
   }
 }
