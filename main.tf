@@ -172,14 +172,13 @@ resource "google_secret_manager_secret" "internal_api_key" {
   labels = var.common_labels
 }
 
-# Runtime SA needs to read the API key secret
-resource "google_secret_manager_secret_iam_member" "runtime_api_key_access" {
-  secret_id = google_secret_manager_secret.internal_api_key.secret_id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.runtime.email}"
-}
+# NEO-20: the browser service no longer reads INTERNAL_API_KEY (auth moved
+# to Cloud Run IAM). The secret itself is retained because the preprocess
+# service still consumes it, but the browser runtime SA's accessor grant
+# is gone.
 
-# Deployer SA needs to read the API key secret (for post-deploy smoke tests)
+# Deployer SA needs to read the API key secret (for post-deploy smoke tests
+# of services that still use it — preprocess).
 resource "google_secret_manager_secret_iam_member" "deployer_api_key_access" {
   secret_id = google_secret_manager_secret.internal_api_key.secret_id
   role      = "roles/secretmanager.secretAccessor"
@@ -229,15 +228,9 @@ resource "google_cloud_run_service" "neonbinder_browser" {
           }
         }
 
-        env {
-          name = "INTERNAL_API_KEY"
-          value_from {
-            secret_key_ref {
-              name = google_secret_manager_secret.internal_api_key.secret_id
-              key  = "latest"
-            }
-          }
-        }
+        # NEO-20: INTERNAL_API_KEY env var removed — authentication is
+        # now enforced by Cloud Run IAM rather than an app-layer header
+        # check inside the service.
 
         env {
           name  = "ENVIRONMENT"
@@ -290,26 +283,14 @@ resource "google_cloud_run_service" "neonbinder_browser" {
   }
 }
 
-# Allow unauthenticated access to Cloud Run.
-# Convex cannot perform GCP IAM auth, so we rely on the INTERNAL_API_KEY header
-# (validated with timing-safe comparison + rate limiting) for authentication.
-#
-# NEO-20 step 1: granting the Convex SA invoker is additive — it lives
-# alongside the allUsers grant for now. A follow-up PR removes allUsers
-# (and the INTERNAL_API_KEY env wiring) after the web + browser services
-# have shipped their OIDC-token + IAM-only changes.
-resource "google_cloud_run_service_iam_member" "public_access" {
-  location = google_cloud_run_service.neonbinder_browser.location
-  service  = google_cloud_run_service.neonbinder_browser.name
-  role     = "roles/run.invoker"
-  member   = "allUsers"
-}
-
-# NEO-20 step 1: pre-grant roles/run.invoker to the neonbinder-convex SA so
-# Convex can start authenticating to the browser service with an OIDC ID
-# token (audience = Cloud Run service URL) before allUsers is removed. This
-# resource is intentionally additive — applying it alone causes zero behavior
-# change because allUsers still has the same role.
+# NEO-20: allUsers invoker removed. Authentication is now enforced solely
+# by Cloud Run IAM, with the neonbinder-convex SA holding the invoker role
+# (resource below). The Convex web layer authenticates by minting a Google
+# OIDC ID token whose audience equals this Cloud Run service URL; anything
+# anonymous is rejected at the Cloud Run edge with 403 before reaching
+# Express. The browser PR's cloudbuild deploy stripped allUsers from the
+# live IAM via `--no-allow-unauthenticated`; this PR brings terraform state
+# in line so future plans don't try to re-add it.
 resource "google_cloud_run_service_iam_member" "convex_invoker" {
   location = google_cloud_run_service.neonbinder_browser.location
   service  = google_cloud_run_service.neonbinder_browser.name
