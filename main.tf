@@ -172,14 +172,13 @@ resource "google_secret_manager_secret" "internal_api_key" {
   labels = var.common_labels
 }
 
-# Runtime SA needs to read the API key secret
-resource "google_secret_manager_secret_iam_member" "runtime_api_key_access" {
-  secret_id = google_secret_manager_secret.internal_api_key.secret_id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.runtime.email}"
-}
+# NEO-20: the browser service no longer reads INTERNAL_API_KEY (auth moved
+# to Cloud Run IAM). The secret itself is retained because the preprocess
+# service still consumes it, but the browser runtime SA's accessor grant
+# is gone.
 
-# Deployer SA needs to read the API key secret (for post-deploy smoke tests)
+# Deployer SA needs to read the API key secret (for post-deploy smoke tests
+# of services that still use it — preprocess).
 resource "google_secret_manager_secret_iam_member" "deployer_api_key_access" {
   secret_id = google_secret_manager_secret.internal_api_key.secret_id
   role      = "roles/secretmanager.secretAccessor"
@@ -204,7 +203,21 @@ resource "google_cloud_run_service" "neonbinder_browser" {
   location = var.gcp_region
 
   template {
+    metadata {
+      annotations = {
+        # minScale=1 keeps one warm Puppeteer-Chromium container alive at
+        # all times. Without it, every cold call (BSC token fetch, marketplace
+        # scrape) pays a 5–15s container boot, which cascades into the 60s+
+        # variantType-sync test failures tracked in NEO-12. The tradeoff is
+        # ~$10/mo per environment to keep one 4Gi/2CPU container warm.
+        "autoscaling.knative.dev/minScale" = tostring(var.cloud_run_min_instances)
+        "autoscaling.knative.dev/maxScale" = tostring(var.cloud_run_max_instances)
+      }
+    }
+
     spec {
+      container_concurrency = var.cloud_run_container_concurrency
+
       containers {
         image = var.cloud_run_image
 
@@ -215,15 +228,9 @@ resource "google_cloud_run_service" "neonbinder_browser" {
           }
         }
 
-        env {
-          name = "INTERNAL_API_KEY"
-          value_from {
-            secret_key_ref {
-              name = google_secret_manager_secret.internal_api_key.secret_id
-              key  = "latest"
-            }
-          }
-        }
+        # NEO-20: INTERNAL_API_KEY env var removed — authentication is
+        # now enforced by Cloud Run IAM rather than an app-layer header
+        # check inside the service.
 
         env {
           name  = "ENVIRONMENT"
@@ -250,21 +257,54 @@ resource "google_cloud_run_service" "neonbinder_browser" {
     # at 100% on push; prod's blue/green gate carves out tagged no-traffic
     # PR previews + a tagged no-traffic prod candidate. Terraform flipping
     # back to latest_revision=true on every plan would fight both.
+    # The client-name/client-version annotations are auto-set by gcloud on
+    # every deploy and show as drift on the next plan; ignoring only those
+    # specific keys keeps terraform in control of minScale/maxScale but
+    # stops the churn (mirrors the preprocess service's pattern below).
     ignore_changes = [
       template[0].spec[0].containers[0].image,
       traffic,
+      template[0].metadata[0].annotations["run.googleapis.com/client-name"],
+      template[0].metadata[0].annotations["run.googleapis.com/client-version"],
+      # Knative auto-sets a per-revision nonce label; terraform doesn't
+      # manage any labels on this template, so ignore the whole map.
+      template[0].metadata[0].labels,
+      # The deploy workflow (gcloud run deploy) re-asserts these on every
+      # push and normalizes the cpu format from "2000m" → "2". Without
+      # ignoring them, every terraform apply attempts to flip them back
+      # and Cloud Run rejects the resulting revision update with 409
+      # ("Revision named <NNN-XXX> with different configuration already
+      # exists"). The cloudbuild workflow is the source of truth for these
+      # values — terraform should not race the deploy.
+      template[0].spec[0].containers[0].resources,
+      template[0].metadata[0].annotations["autoscaling.knative.dev/minScale"],
+      template[0].metadata[0].annotations["autoscaling.knative.dev/maxScale"],
+      # NEO-20: the live container still carries the now-unused
+      # INTERNAL_API_KEY env binding (the deploy workflow propagates it on
+      # every revision via the previous main.tf). Code in the browser
+      # service no longer reads the value; it is dead weight. Removing it
+      # via terraform triggers the same 409 revision-naming conflict as
+      # other in-place spec edits, so we let it bleed out of live state
+      # naturally on the next deploy that doesn't re-add it. Ignore env
+      # changes here so future plans stay quiet.
+      template[0].spec[0].containers[0].env,
     ]
   }
 }
 
-# Allow unauthenticated access to Cloud Run.
-# Convex cannot perform GCP IAM auth, so we rely on the INTERNAL_API_KEY header
-# (validated with timing-safe comparison + rate limiting) for authentication.
-resource "google_cloud_run_service_iam_member" "public_access" {
+# NEO-20: allUsers invoker removed. Authentication is now enforced solely
+# by Cloud Run IAM, with the neonbinder-convex SA holding the invoker role
+# (resource below). The Convex web layer authenticates by minting a Google
+# OIDC ID token whose audience equals this Cloud Run service URL; anything
+# anonymous is rejected at the Cloud Run edge with 403 before reaching
+# Express. The browser PR's cloudbuild deploy stripped allUsers from the
+# live IAM via `--no-allow-unauthenticated`; this PR brings terraform state
+# in line so future plans don't try to re-add it.
+resource "google_cloud_run_service_iam_member" "convex_invoker" {
   location = google_cloud_run_service.neonbinder_browser.location
   service  = google_cloud_run_service.neonbinder_browser.name
   role     = "roles/run.invoker"
-  member   = "allUsers"
+  member   = "serviceAccount:${google_service_account.convex.email}"
 }
 
 # ──────────────────────────────────────────────
@@ -761,6 +801,67 @@ resource "google_service_account_iam_member" "tf_deployer_act_as_preprocess_depl
   service_account_id = google_service_account.preprocess_deployer.name
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+# ──────────────────────────────────────────────
+# Preprocess test-fixture bucket — dev only
+# ──────────────────────────────────────────────
+# Home for the real-card integration-test fixtures that are too large to
+# commit to git (phone-camera shots at 22-26 MB each). Only the YAML
+# expectation sidecars live in the preprocess repo; images live here and
+# are fetched on demand via `scripts/fetch_fixtures.py`. No prod mirror:
+# these are test data that dev services consume during integration runs.
+
+resource "google_storage_bucket" "preprocess_fixtures" {
+  count    = var.create_preprocess_fixtures_bucket ? 1 : 0
+  name     = "neonbinder-dev-preprocess-fixtures"
+  location = var.gcp_region
+
+  uniform_bucket_level_access = true
+
+  versioning {
+    # Keep a history of fixture versions so a test regression can be traced
+    # to an image replacement.
+    enabled = true
+  }
+
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      # Prune old non-current versions at 1 year; live objects retained forever.
+      age                = 365
+      with_state         = "ARCHIVED"
+      num_newer_versions = 3
+    }
+  }
+
+  labels = var.common_labels
+}
+
+# Developers upload + fetch fixtures. objectAdmin gives read/write/delete.
+resource "google_storage_bucket_iam_member" "preprocess_fixtures_developer_admin" {
+  for_each = var.create_preprocess_fixtures_bucket ? toset(var.developer_emails) : toset([])
+  bucket   = google_storage_bucket.preprocess_fixtures[0].name
+  role     = "roles/storage.objectAdmin"
+  member   = "user:${each.value}"
+}
+
+# Preprocess runtime + deployer SAs can read fixtures so a future CI
+# integration-test job can fetch them before running pytest tests/integration.
+resource "google_storage_bucket_iam_member" "preprocess_fixtures_runtime_reader" {
+  count  = var.create_preprocess_fixtures_bucket ? 1 : 0
+  bucket = google_storage_bucket.preprocess_fixtures[0].name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.preprocess_runtime.email}"
+}
+
+resource "google_storage_bucket_iam_member" "preprocess_fixtures_deployer_reader" {
+  count  = var.create_preprocess_fixtures_bucket ? 1 : 0
+  bucket = google_storage_bucket.preprocess_fixtures[0].name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.preprocess_deployer.email}"
 }
 
 # ──────────────────────────────────────────────
