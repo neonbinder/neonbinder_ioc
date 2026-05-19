@@ -288,6 +288,14 @@ resource "google_cloud_run_service" "neonbinder_browser" {
       # naturally on the next deploy that doesn't re-add it. Ignore env
       # changes here so future plans stay quiet.
       template[0].spec[0].containers[0].env,
+      # Prod's live container_concurrency drifted to 80 (set externally at
+      # some point); terraform code says 3 (var default). Any attempt to
+      # flip it triggers the same 409 revision-naming conflict on a
+      # spec-update. Ignore so plans/applies stay clean. Effective
+      # concurrency is whatever the live revision has — to re-set it
+      # explicitly, run gcloud run services update --concurrency=N out of
+      # band and update the var if you want terraform code to reflect it.
+      template[0].spec[0].container_concurrency,
     ]
   }
 }
