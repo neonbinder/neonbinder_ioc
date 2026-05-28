@@ -315,6 +315,35 @@ resource "google_cloud_run_service_iam_member" "convex_invoker" {
   member   = "serviceAccount:${google_service_account.convex.email}"
 }
 
+# NEO-20 follow-up: the CI deploy gate's login-probe jobs (in
+# neonbinder_browser/.github/workflows/browser-deploy.yml) call the freshly
+# deployed-but-not-yet-promoted tagged revision over HTTP before shifting
+# traffic. Since #31 removed the app-layer x-internal-key check, those probes
+# must present a Google OIDC ID token, and the identity behind that token
+# needs roles/run.invoker on the service or Cloud Run rejects it with 403.
+# The probes authenticate as the deployer SA (via WIF), so the deployer needs
+# the invoker role here — same scoped pattern as runtime_invoker/convex_invoker,
+# NOT a broad project grant. run.admin (granted elsewhere) covers *managing*
+# the service but does not by itself satisfy the per-service invoke check.
+resource "google_cloud_run_service_iam_member" "deployer_invoker" {
+  location = google_cloud_run_service.neonbinder_browser.location
+  service  = google_cloud_run_service.neonbinder_browser.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+# Allow the GitHub Actions WIF principal to mint OIDC ID tokens *as* the
+# deployer SA (iamcredentials.generateIdToken). workloadIdentityUser (granted
+# in github_actions_wif) lets CI assume the SA for access tokens, but minting
+# an audience-scoped ID token for the login-probe requires
+# serviceAccountTokenCreator on the SA. Scoped to this one SA, same principalSet
+# as the existing workloadIdentityUser binding.
+resource "google_service_account_iam_member" "deployer_id_token_creator" {
+  service_account_id = google_service_account.deployer.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_actions.name}/attribute.repository/${var.github_repo}"
+}
+
 # ──────────────────────────────────────────────
 # GCS Bucket for prizes (prod only)
 # ──────────────────────────────────────────────
