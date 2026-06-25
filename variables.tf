@@ -85,6 +85,12 @@ variable "github_repo_preprocess" {
   default     = "neonbinder/neonbinder_preprocess"
 }
 
+variable "github_repo_convex" {
+  description = "GitHub repository (owner/repo) for the neonbinder_web app (its git remote is the neonbinder_convex repo). Its e2e workflow uses WIF to READ Cloud Run for browser-preview discovery (NEO-35)."
+  type        = string
+  default     = "neonbinder/neonbinder_convex"
+}
+
 # Preprocess Cloud Run configuration
 variable "preprocess_service_name" {
   description = "Name for the preprocess Cloud Run service"
@@ -161,6 +167,12 @@ variable "create_prizes_bucket" {
 
 variable "create_preprocess_fixtures_bucket" {
   description = "Whether to create the preprocess test-fixture GCS bucket (dev only). Test images for `neonbinder_preprocess` integration tests live here — too large to commit to git. Not needed in prod."
+  type        = bool
+  default     = false
+}
+
+variable "create_convex_e2e_reader" {
+  description = "Whether to create the read-only Cloud Run reader SA + WIF provider for the web repo's e2e workflow (dev only — browser previews only exist on dev, and the web CI must never be able to read prod)."
   type        = bool
   default     = false
 }
