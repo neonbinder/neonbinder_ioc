@@ -73,6 +73,16 @@ variable "github_repo" {
   default     = "neonbinder/neonbinder_browser"
 }
 
+# NEO-18: the consolidated monorepo, also allowed to authenticate via WIF so its
+# browser deploy / per-PR Cloud Run preview pipeline can run. Transitional —
+# trusted ALONGSIDE github_repo until the old browser repo is archived (CUTOVER
+# step E), at which point this becomes the sole trusted repo.
+variable "github_repo_monorepo" {
+  description = "Consolidated NEO-18 monorepo (owner/repo) allowed to authenticate via WIF"
+  type        = string
+  default     = "neonbinder/neonbinder"
+}
+
 variable "github_repo_terraform" {
   description = "GitHub repository (owner/repo) for Terraform CI/CD via WIF"
   type        = string

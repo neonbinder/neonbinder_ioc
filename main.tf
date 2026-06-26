@@ -410,7 +410,9 @@ resource "google_iam_workload_identity_pool_provider" "github" {
   # condition. Workflow-level guards
   # (head.repo.full_name == github.repository) still prevent fork-
   # originated previews from acquiring this token.
-  attribute_condition = var.browser_wif_allow_pull_requests ? "assertion.repository == \"${var.github_repo}\" && (assertion.ref == \"${var.browser_wif_branch_ref}\" || assertion.event_name == \"pull_request\")" : "assertion.repository == \"${var.github_repo}\" && assertion.ref == \"${var.browser_wif_branch_ref}\""
+  # NEO-18: trust BOTH the old browser repo and the consolidated monorepo
+  # (OR on repository) while keeping the same ref / pull_request gating.
+  attribute_condition = var.browser_wif_allow_pull_requests ? "(assertion.repository == \"${var.github_repo}\" || assertion.repository == \"${var.github_repo_monorepo}\") && (assertion.ref == \"${var.browser_wif_branch_ref}\" || assertion.event_name == \"pull_request\")" : "(assertion.repository == \"${var.github_repo}\" || assertion.repository == \"${var.github_repo_monorepo}\") && assertion.ref == \"${var.browser_wif_branch_ref}\""
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
@@ -422,6 +424,15 @@ resource "google_service_account_iam_member" "github_actions_wif" {
   service_account_id = google_service_account.deployer.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_actions.name}/attribute.repository/${var.github_repo}"
+}
+
+# NEO-18: same impersonation for the consolidated monorepo (transitional —
+# see github_repo_monorepo; drop github_actions_wif above once the old repo is
+# archived at CUTOVER step E).
+resource "google_service_account_iam_member" "github_actions_wif_monorepo" {
+  service_account_id = google_service_account.deployer.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_actions.name}/attribute.repository/${var.github_repo_monorepo}"
 }
 
 # ──────────────────────────────────────────────
