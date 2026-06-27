@@ -410,7 +410,9 @@ resource "google_iam_workload_identity_pool_provider" "github" {
   # condition. Workflow-level guards
   # (head.repo.full_name == github.repository) still prevent fork-
   # originated previews from acquiring this token.
-  attribute_condition = var.browser_wif_allow_pull_requests ? "assertion.repository == \"${var.github_repo}\" && (assertion.ref == \"${var.browser_wif_branch_ref}\" || assertion.event_name == \"pull_request\")" : "assertion.repository == \"${var.github_repo}\" && assertion.ref == \"${var.browser_wif_branch_ref}\""
+  # NEO-18: trust BOTH the old browser repo and the consolidated monorepo
+  # (OR on repository) while keeping the same ref / pull_request gating.
+  attribute_condition = var.browser_wif_allow_pull_requests ? "(assertion.repository == \"${var.github_repo}\" || assertion.repository == \"${var.github_repo_monorepo}\") && (assertion.ref == \"${var.browser_wif_branch_ref}\" || assertion.event_name == \"pull_request\")" : "(assertion.repository == \"${var.github_repo}\" || assertion.repository == \"${var.github_repo_monorepo}\") && assertion.ref == \"${var.browser_wif_branch_ref}\""
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
@@ -422,6 +424,15 @@ resource "google_service_account_iam_member" "github_actions_wif" {
   service_account_id = google_service_account.deployer.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_actions.name}/attribute.repository/${var.github_repo}"
+}
+
+# NEO-18: same impersonation for the consolidated monorepo (transitional —
+# see github_repo_monorepo; drop github_actions_wif above once the old repo is
+# archived at CUTOVER step E).
+resource "google_service_account_iam_member" "github_actions_wif_monorepo" {
+  service_account_id = google_service_account.deployer.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_actions.name}/attribute.repository/${var.github_repo_monorepo}"
 }
 
 # ──────────────────────────────────────────────
@@ -841,6 +852,75 @@ resource "google_service_account_iam_member" "tf_deployer_act_as_preprocess_depl
 }
 
 # ──────────────────────────────────────────────
+# Convex (web repo) E2E — read-only Cloud Run reader  [dev only, NEO-35]
+# ──────────────────────────────────────────────
+# The neonbinder_web e2e workflow auto-discovers any live per-PR browser-service
+# preview (Cloud Run tagged revision `pr-<N>---neonbinder-browser-…`) so it can
+# point its OWN Convex preview at it and exercise the in-flight browser code.
+# That only needs read-only Cloud Run metadata (services.get/list). A dedicated
+# SA holds ONLY roles/run.viewer on the browser service — no invoke, no
+# project-wide roles — assumed keyless via WIF from the web repo. Dev only:
+# browser previews exist only on dev, and the web repo's CI must never be able
+# to read prod. Gated on create_convex_e2e_reader (true only in dev.tfvars).
+
+resource "google_service_account" "convex_e2e_reader" {
+  count        = var.create_convex_e2e_reader ? 1 : 0
+  account_id   = "neonbinder-convex-e2e"
+  display_name = "Convex web e2e — Cloud Run reader (run.viewer only)"
+}
+
+# WIF provider scoped to the web repo, accepting only pull_request OIDC tokens
+# (the e2e workflow runs on pull_request). One-provider-per-repo, mirroring the
+# browser/preprocess providers; the existing providers' conditions are untouched.
+resource "google_iam_workload_identity_pool_provider" "github_convex" {
+  count                              = var.create_convex_e2e_reader ? 1 : 0
+  workload_identity_pool_id          = google_iam_workload_identity_pool.github_actions.workload_identity_pool_id
+  workload_identity_pool_provider_id = "github-convex"
+  display_name                       = "GitHub Convex (web e2e)"
+
+  attribute_mapping = {
+    "google.subject"       = "assertion.sub"
+    "attribute.repository" = "assertion.repository"
+    "attribute.ref"        = "assertion.ref"
+    "attribute.event_name" = "assertion.event_name"
+  }
+
+  # Web e2e runs on pull_request only. Workflow-level guards
+  # (head.repo.full_name == github.repository) still keep fork PRs out.
+  attribute_condition = "assertion.repository == \"${var.github_repo_convex}\" && assertion.event_name == \"pull_request\""
+
+  oidc {
+    issuer_uri = "https://token.actions.githubusercontent.com"
+  }
+}
+
+# Let the web repo's GitHub Actions impersonate the read-only reader SA.
+resource "google_service_account_iam_member" "github_actions_wif_convex" {
+  count              = var.create_convex_e2e_reader ? 1 : 0
+  service_account_id = google_service_account.convex_e2e_reader[0].name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_actions.name}/attribute.repository/${var.github_repo_convex}"
+}
+
+# The ONLY grant the reader SA holds: read-only metadata on the browser service
+# (enough for `gcloud run services describe`). roles/run.viewer does NOT invoke.
+resource "google_cloud_run_service_iam_member" "convex_e2e_reader_run_viewer" {
+  count    = var.create_convex_e2e_reader ? 1 : 0
+  location = google_cloud_run_service.neonbinder_browser.location
+  service  = google_cloud_run_service.neonbinder_browser.name
+  role     = "roles/run.viewer"
+  member   = "serviceAccount:${google_service_account.convex_e2e_reader[0].email}"
+}
+
+# Let the terraform-deployer SA manage the reader SA during apply.
+resource "google_service_account_iam_member" "tf_deployer_act_as_convex_e2e_reader" {
+  count              = var.create_convex_e2e_reader ? 1 : 0
+  service_account_id = google_service_account.convex_e2e_reader[0].name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+# ──────────────────────────────────────────────
 # Preprocess test-fixture bucket — dev only
 # ──────────────────────────────────────────────
 # Home for the real-card integration-test fixtures that are too large to
@@ -968,4 +1048,14 @@ output "preprocess_cloud_run_url" {
 output "wif_provider_preprocess_name" {
   description = "Full resource name of the preprocess WIF provider (set as GCP_WIF_PROVIDER_PREPROCESS[_DEV] GitHub secret)"
   value       = google_iam_workload_identity_pool_provider.github_preprocess.name
+}
+
+output "wif_provider_convex_name" {
+  description = "Full resource name of the web-repo (convex) WIF provider for e2e Cloud Run discovery — set as the GCP_WIF_PROVIDER_DEV GitHub secret on neonbinder_convex (null outside dev)"
+  value       = one(google_iam_workload_identity_pool_provider.github_convex[*].name)
+}
+
+output "convex_e2e_reader_service_account_email" {
+  description = "Email of the read-only Cloud Run reader SA used by the web repo's e2e workflow — set as the GCP_SA_CONVEX_E2E GitHub secret on neonbinder_convex (null outside dev)"
+  value       = one(google_service_account.convex_e2e_reader[*].email)
 }
