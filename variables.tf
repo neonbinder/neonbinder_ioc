@@ -67,18 +67,10 @@ variable "cloud_run_max_instances" {
 }
 
 # GitHub Actions
-variable "github_repo" {
-  description = "GitHub repository (owner/repo) allowed to authenticate via WIF"
-  type        = string
-  default     = "neonbinder/neonbinder_browser"
-}
-
-# NEO-18: the consolidated monorepo, also allowed to authenticate via WIF so its
-# browser deploy / per-PR Cloud Run preview pipeline can run. Transitional —
-# trusted ALONGSIDE github_repo until the old browser repo is archived (CUTOVER
-# step E), at which point this becomes the sole trusted repo.
+# NEO-18 cutover: the old neonbinder_browser repo was archived and this is now
+# the sole repo trusted for browser deploy / per-PR Cloud Run preview WIF auth.
 variable "github_repo_monorepo" {
-  description = "Consolidated NEO-18 monorepo (owner/repo) allowed to authenticate via WIF"
+  description = "Consolidated monorepo (owner/repo) allowed to authenticate via WIF for browser deploy / per-PR Cloud Run preview"
   type        = string
   default     = "neonbinder/neonbinder"
 }
@@ -93,12 +85,6 @@ variable "github_repo_preprocess" {
   description = "GitHub repository (owner/repo) for the preprocess service CI/CD via WIF"
   type        = string
   default     = "neonbinder/neonbinder_preprocess"
-}
-
-variable "github_repo_convex" {
-  description = "GitHub repository (owner/repo) for the neonbinder_web app (its git remote is the neonbinder_convex repo). Its e2e workflow uses WIF to READ Cloud Run for browser-preview discovery (NEO-35)."
-  type        = string
-  default     = "neonbinder/neonbinder_convex"
 }
 
 # Preprocess Cloud Run configuration
@@ -177,12 +163,6 @@ variable "create_prizes_bucket" {
 
 variable "create_preprocess_fixtures_bucket" {
   description = "Whether to create the preprocess test-fixture GCS bucket (dev only). Test images for `neonbinder_preprocess` integration tests live here — too large to commit to git. Not needed in prod."
-  type        = bool
-  default     = false
-}
-
-variable "create_convex_e2e_reader" {
-  description = "Whether to create the read-only Cloud Run reader SA + WIF provider for the web repo's e2e workflow (dev only — browser previews only exist on dev, and the web CI must never be able to read prod)."
   type        = bool
   default     = false
 }
