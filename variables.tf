@@ -167,6 +167,17 @@ variable "create_preprocess_fixtures_bucket" {
   default     = false
 }
 
+# NEO-95: the google_billing_budget resource is scoped to the BILLING ACCOUNT,
+# not a project — it must be created exactly once, not once per environment
+# apply. Gate it behind this flag and only set it true in prod.tfvars, so the
+# prod apply is the single apply that creates it (it still covers spend across
+# both the neonbinder and neonbinder-dev projects via budget_filter.projects).
+variable "enable_billing_budget" {
+  description = "Whether to create the billing-account-scoped budget/alert resource. Must be true in exactly one environment (prod) since google_billing_budget is not project-scoped."
+  type        = bool
+  default     = false
+}
+
 variable "cross_env_tf_deployer_emails" {
   description = "TF-deployer SA emails from OTHER environments that need access to this environment's shared state bucket. Set in prod.tfvars to grant the dev tf-deployer access to the prod-hosted state bucket; empty in dev."
   type        = list(string)
