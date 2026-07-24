@@ -1020,6 +1020,27 @@ resource "google_billing_budget" "gcp_spend" {
 }
 
 # ──────────────────────────────────────────────
+# Billing Export destination dataset (NEO-95)
+# ──────────────────────────────────────────────
+# GCP's "Billing export to BigQuery" toggle (Billing console → Billing export)
+# has no Terraform resource — it can only be wired up manually in the console.
+# But the BigQuery dataset it exports *into* is an ordinary project resource,
+# so that part is created here. Gated behind the same var.enable_billing_budget
+# flag (true only in environments/prod.tfvars) since, like the budget, this
+# only needs to exist once for the whole billing account, and prod is where
+# billing-account-level resources for NEO-95 live.
+#
+# No expiration is set on the dataset or its tables — billing export data
+# must never auto-delete.
+resource "google_bigquery_dataset" "billing_export" {
+  count       = var.enable_billing_budget ? 1 : 0
+  project     = var.gcp_project_id
+  dataset_id  = "billing_export"
+  location    = "US"
+  description = "Destination for GCP detailed billing export (NEO-95) — wired up manually in the Billing console, this dataset is just the target."
+}
+
+# ──────────────────────────────────────────────
 # Outputs
 # ──────────────────────────────────────────────
 
