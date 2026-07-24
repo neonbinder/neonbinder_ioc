@@ -153,7 +153,7 @@ resource "google_artifact_registry_repository" "gcr_io" {
 
     condition {
       tag_state  = "UNTAGGED"
-      older_than = "14d"
+      older_than = "1209600s" # 14 days
     }
   }
 
