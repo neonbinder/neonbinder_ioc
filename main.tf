@@ -533,6 +533,17 @@ resource "google_project_iam_member" "tf_deployer_wif_admin" {
   member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
 }
 
+# NEO-95: prod apply of google_bigquery_dataset.billing_export failed with
+# "Access Denied: ... does not have bigquery.datasets.create permission" —
+# unlike the other tf_deployer_*_admin grants above, BigQuery was never
+# needed here before. dataEditor (not the broader bigquery.admin) is enough
+# for dataset create/manage; it doesn't grant job/model/routine admin.
+resource "google_project_iam_member" "tf_deployer_bigquery_data_editor" {
+  project = var.gcp_project_id
+  role    = "roles/bigquery.dataEditor"
+  member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
 # Needed so terraform plan can read `google_project_service` state (which APIs
 # are enabled) and apply changes to enablement.
 resource "google_project_iam_member" "tf_deployer_serviceusage_admin" {
@@ -1038,6 +1049,8 @@ resource "google_bigquery_dataset" "billing_export" {
   dataset_id  = "billing_export"
   location    = "US"
   description = "Destination for GCP detailed billing export (NEO-95) — wired up manually in the Billing console, this dataset is just the target."
+
+  depends_on = [google_project_iam_member.tf_deployer_bigquery_data_editor]
 }
 
 # ──────────────────────────────────────────────
