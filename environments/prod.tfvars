@@ -5,6 +5,9 @@ cloud_run_image        = "gcr.io/neonbinder/neonbinder-browser:latest"
 preprocess_image       = "gcr.io/neonbinder/neonbinder-preprocess:latest"
 create_prizes_bucket   = true
 wif_branch_ref         = "refs/heads/main"
+# NEO-95: billing budget is billing-account-scoped, not project-scoped — only
+# enable it here (prod apply) so it's created exactly once, not once per env.
+enable_billing_budget = true
 cross_env_tf_deployer_emails = [
   "neonbinder-tf-deployer@neonbinder-dev.iam.gserviceaccount.com",
 ]
