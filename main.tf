@@ -6,6 +6,21 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 4.0"
     }
+    # NEO-95: `google-beta` only, needed for `cleanup_policies` /
+    # `cleanup_policy_dry_run` on google_artifact_registry_repository.gcr_io.
+    # Verified against the actual provider source at v4.85.0 (the latest,
+    # and last, 4.x release — there is no newer 4.x to pin to instead): the
+    # GA `google` provider's resource_artifact_registry_repository.go has no
+    # "cleanup" fields at all, while `google-beta`'s does. The feature was
+    # never promoted out of beta within the 4.x line. Everything else in this
+    # file stays on the GA `google` provider; only that one resource opts in
+    # to `google-beta` via `provider = google-beta`. Auth/permissions are
+    # identical to the GA provider (same credentials, same APIs) — this is
+    # purely a schema-availability workaround, not a new trust boundary.
+    google-beta = {
+      source  = "hashicorp/google-beta"
+      version = "~> 4.0"
+    }
   }
 
   # GCS remote state — prefix set at init time via -backend-config="prefix=terraform/state/<env>"
@@ -16,6 +31,13 @@ terraform {
 
 # Configure the Google Provider
 provider "google" {
+  project = var.gcp_project_id
+  region  = var.gcp_region
+}
+
+# NEO-95: see required_providers comment above — used only by
+# google_artifact_registry_repository.gcr_io for cleanup_policies support.
+provider "google-beta" {
   project = var.gcp_project_id
   region  = var.gcp_region
 }
@@ -104,12 +126,45 @@ resource "google_service_account_iam_member" "deployer_act_as_runtime" {
 # Prod has this pre-existing from Google's GCR-to-AR migration; dev's was
 # manually created on 2026-04-16 when CI needed it for its first Docker push.
 # Both are now tracked by Terraform.
+#
+# NEO-95: dev's repo hit 107GB and was growing forever — every CI push (browser
+# + preprocess services) adds a new commit-sha-tagged image that was never
+# cleaned up. cleanup_policies below cap growth in both envs:
+#   - "delete-old-untagged": untagged images (superseded manifests, failed
+#     pushes) older than 14 days are deleted.
+#   - "keep-recent-tagged": the most recent 15 tagged versions are always
+#     retained, regardless of age — protects rollback candidates and any live
+#     `pr-<N>` preview tags.
+# Anything not matched by either policy (i.e. a tagged image older than the 15
+# most recent) is left alone; there's no "delete old tagged" rule, since tags
+# are the only durable pointer to a deployable image.
 resource "google_artifact_registry_repository" "gcr_io" {
-  project       = var.gcp_project_id
-  location      = "us"
-  repository_id = "gcr.io"
-  format        = "DOCKER"
-  description   = "Legacy gcr.io-compatible Docker image registry"
+  provider               = google-beta
+  project                = var.gcp_project_id
+  location               = "us"
+  repository_id          = "gcr.io"
+  format                 = "DOCKER"
+  description            = "Legacy gcr.io-compatible Docker image registry"
+  cleanup_policy_dry_run = false
+
+  cleanup_policies {
+    id     = "delete-old-untagged"
+    action = "DELETE"
+
+    condition {
+      tag_state  = "UNTAGGED"
+      older_than = "1209600s" # 14 days
+    }
+  }
+
+  cleanup_policies {
+    id     = "keep-recent-tagged"
+    action = "KEEP"
+
+    most_recent_versions {
+      keep_count = 15
+    }
+  }
 }
 
 # createOnPushWriter lets the browser deployer push to a repo path that doesn't
@@ -891,6 +946,77 @@ resource "google_storage_bucket_iam_member" "preprocess_fixtures_deployer_reader
   bucket = google_storage_bucket.preprocess_fixtures[0].name
   role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.preprocess_deployer.email}"
+}
+
+# ──────────────────────────────────────────────
+# Billing Budget / Cost Alerts (NEO-95)
+# ──────────────────────────────────────────────
+# There was no billing budget or spend alert at all on the "Neon Binder
+# Billing" account (01C86C-DBCAE6-406609) — confirmed via
+# `gcloud billing budgets list --billing-account=01C86C-DBCAE6-406609`
+# returning zero results, and the Billing Budget API not yet enabled.
+#
+# google_billing_budget is scoped to the BILLING ACCOUNT, not a project, so
+# it must only be created once — this whole section is gated behind
+# var.enable_billing_budget, which is only true in environments/prod.tfvars.
+# It still covers spend across BOTH projects on this billing account via
+# budget_filter.projects (there are only two: neonbinder + neonbinder-dev).
+
+# Required to call the Budgets API at all; enabled on whichever project
+# performs the apply (prod, since that's the only apply with the flag on).
+resource "google_project_service" "billingbudgets_api" {
+  count              = var.enable_billing_budget ? 1 : 0
+  project            = var.gcp_project_id
+  service            = "billingbudgets.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_billing_budget" "gcp_spend" {
+  count           = var.enable_billing_budget ? 1 : 0
+  billing_account = "01C86C-DBCAE6-406609"
+  display_name    = "NeonBinder monthly GCP spend"
+
+  budget_filter {
+    # Only projects on this billing account today; scoping explicitly rather
+    # than leaving unfiltered so a future third project doesn't silently
+    # start contributing to (or diluting) these alerts.
+    projects = [
+      "projects/117170654588", # neonbinder (prod)
+      "projects/339836466983", # neonbinder-dev (dev)
+    ]
+  }
+
+  amount {
+    specified_amount {
+      currency_code = "USD"
+      units         = "500"
+    }
+  }
+
+  # Actual-spend thresholds at 20/50/80/100% of the $500/mo budget amount.
+  threshold_rules {
+    threshold_percent = 0.2
+    spend_basis       = "CURRENT_SPEND"
+  }
+  threshold_rules {
+    threshold_percent = 0.5
+    spend_basis       = "CURRENT_SPEND"
+  }
+  threshold_rules {
+    threshold_percent = 0.8
+    spend_basis       = "CURRENT_SPEND"
+  }
+  threshold_rules {
+    threshold_percent = 1.0
+    spend_basis       = "CURRENT_SPEND"
+  }
+
+  # No all_updates_rule / pubsub_topic wired up: with no notification channels
+  # or pubsub topic configured, GCP falls back to emailing the billing
+  # account's Billing Admins/Users — sufficient for now. Revisit if we want
+  # Slack/PagerDuty routing later.
+
+  depends_on = [google_project_service.billingbudgets_api]
 }
 
 # ──────────────────────────────────────────────
