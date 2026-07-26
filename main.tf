@@ -1557,7 +1557,12 @@ resource "google_monitoring_alert_policy" "browser_login_failures" {
       # string the service yields when it cannot classify — is a genuine
       # "the marketplace or our service is broken" signal.
       filter = join(" AND ", [
-        "metric.type=\"logging.googleapis.com/user/browser_login_failures\"",
+        # Interpolated rather than hardcoded so Terraform knows this policy
+        # DEPENDS ON the metric. Without that edge it may create the policy
+        # first, and Cloud Monitoring happily accepts a filter naming a
+        # metric type that does not exist yet — producing a policy that never
+        # matches anything and reports healthy forever.
+        "metric.type=\"logging.googleapis.com/user/${google_logging_metric.browser_login_failures[0].name}\"",
         "resource.type=\"cloud_run_revision\"",
         "metric.label.error_class!=\"invalid_credentials\"",
         "metric.label.error_class!=\"bad_key_format\"",
@@ -1617,7 +1622,9 @@ resource "google_monitoring_alert_policy" "browser_login_hang" {
 
     condition_threshold {
       filter = join(" AND ", [
-        "metric.type=\"logging.googleapis.com/user/browser_login_http_status\"",
+        # Interpolated so Terraform creates the metric first — see the note on
+        # the failures policy above.
+        "metric.type=\"logging.googleapis.com/user/${google_logging_metric.browser_login_http_status[0].name}\"",
         "resource.type=\"cloud_run_revision\"",
         # 500 EXCLUDED — see the note at the top of this section: an ordinary
         # BSC credential rejection is a 500. None of 499/502/503/504 can be
@@ -1677,7 +1684,9 @@ resource "google_monitoring_alert_policy" "browser_login_latency" {
 
     condition_threshold {
       filter = join(" AND ", [
-        "metric.type=\"logging.googleapis.com/user/browser_login_duration_ms\"",
+        # Interpolated so Terraform creates the metric first — see the note on
+        # the failures policy above.
+        "metric.type=\"logging.googleapis.com/user/${google_logging_metric.browser_login_duration_ms[0].name}\"",
         "resource.type=\"cloud_run_revision\"",
       ])
 
@@ -1746,7 +1755,11 @@ resource "google_monitoring_alert_policy" "browser_login_canary_absent" {
 
     condition_absent {
       filter = join(" AND ", [
-        "metric.type=\"logging.googleapis.com/user/browser_login_duration_ms\"",
+        # Interpolated so Terraform creates the metric first — see the note on
+        # the failures policy above. Doubly important here: an absence policy
+        # pointed at a non-existent metric type sees permanent absence, so the
+        # ordering bug would not fail quietly — it would page immediately.
+        "metric.type=\"logging.googleapis.com/user/${google_logging_metric.browser_login_duration_ms[0].name}\"",
         "resource.type=\"cloud_run_revision\"",
         "metric.label.canary=\"true\"",
       ])
