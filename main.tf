@@ -1335,6 +1335,19 @@ resource "google_logging_metric" "browser_login_duration_ms" {
 # Unlike the two metrics above, pinning logName IS correct here: request logs
 # are emitted by Cloud Run infrastructure, not by the app, so the log stream
 # cannot move under us.
+#
+# WHY THE FILTER IS >=400 AND NOT >=499: an audit of 30 days of prod request
+# logs (2026-07-26) found 19 requests to /login/*, ALL of them HTTP 200 — not
+# one non-2xx. So the status set the hang policy matches (499|502|503|504) is
+# currently an UNVERIFIED HYPOTHESIS: there is no observed example of what
+# Cloud Run records when Convex aborts at 60s, and if it turns out to be
+# something else the policy would silently never fire.
+#
+# Capturing from 400 costs nothing (log-based metrics over already-ingested
+# logs are free) and builds the evidence base to tune against. The POLICY is
+# unchanged — it still filters to 499|502|503|504 — so this widening adds
+# observability only, never new pages. Revisit the status set once real
+# non-2xx data exists.
 resource "google_logging_metric" "browser_login_http_status" {
   count   = var.enable_browser_login_alerts ? 1 : 0
   project = var.gcp_project_id
@@ -1345,7 +1358,7 @@ resource "google_logging_metric" "browser_login_http_status" {
     resource.labels.service_name="${var.cloud_run_service_name}"
     logName="projects/${var.gcp_project_id}/logs/run.googleapis.com%2Frequests"
     httpRequest.requestUrl=~"/login/(bsc|sportlots)$"
-    httpRequest.status>=499
+    httpRequest.status>=400
   EOT
 
   metric_descriptor {
@@ -1482,9 +1495,10 @@ locals {
     ${var.browser_login_latency_threshold_ms}ms over 10 minutes. Convex hard-aborts at
     60s, so logins are close to failing outright.
 
-    Baseline for comparison: BSC fresh ~4.4s, BSC cached-token ~1.1s,
-    SportLots plus its retry budget up to ~12s. A cold start on the ~1GB image
-    adds several seconds on top.
+    Measured baseline from prod logs (2026-07-26, 30d): BSC 2.5-3.3s,
+    SportLots 1.2-1.5s. A cold start on the ~1GB image adds several seconds on
+    top (min-instances=0 is intentional, NEO-95). Anything in the tens of
+    seconds is far outside normal.
 
     ${local.neo43_runbook_common}
   EOT
@@ -1904,12 +1918,18 @@ locals {
   login_canary_audience = var.enable_login_canary ? google_cloud_run_service.neonbinder_browser.status[0].url : ""
 }
 
-# retry_count = 0 is load-bearing, not a default. NEO-29: retrying a failed
-# marketplace login turned a single hiccup into a sustained burst of
-# serialized BSC logins that tripped bot protection — "the retry caused the
-# failures it was meant to fix". A canary that retried would recreate exactly
-# that shape on a schedule, forever. Flakiness is absorbed by the alert policy
-# requiring repeated failures, not by retrying inside one run.
+# retry_count = 0 is load-bearing, not a default — but NOT for rate-limit or
+# anti-abuse reasons. Neither BSC nor SportLots throttles logins, and there is
+# no such thing as BSC "bot protection"; that belief has been raised and
+# disproven repeatedly on this project, and anywhere it survives in a comment
+# it should be treated as wrong.
+#
+# The real reason is monitoring correctness. Scheduler retries would hide an
+# intermittently-failing marketplace behind a green canary — the canary would
+# quietly succeed on attempt 2 and report nothing, which is the exact opposite
+# of what a probe is for. One attempt per run means every failure is visible;
+# genuine one-off blips are absorbed by the alert policy, which needs repeated
+# failures before it fires.
 #
 # attempt_deadline is deliberately SHORTER than Cloud Run's 300s request
 # timeout, which gives a second, service-independent hang detector: Scheduler

@@ -205,8 +205,9 @@ variable "alert_notification_email" {
   default     = "neonbinder@neonbinder.io"
 }
 
-# Ceiling, not a target. Real p50s today are ~1.1s (BSC cached token) and
-# ~4.4s (BSC fresh); SportLots adds up to ~7.5s of retry sleep. But
+# Ceiling, not a target. MEASURED from prod browser_login_call logs
+# (2026-07-26, 30-day window): BSC 2.5-3.3s, SportLots 1.2-1.5s — comfortably
+# faster than the estimates this was first drafted against. But
 # prod-login-probe does a REAL login against a cold, freshly deployed revision
 # on every push to main, and the repo's own test helper documents that at
 # 20-30s — so a 30s threshold would false-positive on every deploy. The upper
@@ -223,11 +224,15 @@ variable "browser_login_latency_threshold_ms" {
 #
 # Prod only, and separately gated from the alert policies so the canary can be
 # rolled out (or rolled back) without touching the alerting itself. Dev is
-# excluded deliberately: its per-PR and per-push login probes already exercise
-# this code on every change, and marketplace login volume against the shared
-# test account is the scarce resource here (NEO-29 bot protection).
+# excluded because its per-PR and per-push login probes already exercise this
+# code on every change — a dev canary would add cost and log noise for no new
+# signal.
+#
+# NOTE: neither BSC nor SportLots rate-limits or "bot protects" logins. Do not
+# reintroduce that rationale here — it has been raised and disproven
+# repeatedly on this project, and it drives needlessly timid design.
 variable "enable_login_canary" {
-  description = "Whether to create the NEO-43 synthetic marketplace-login canary (dedicated invoker SA, credential secret shells, and two Cloud Scheduler jobs). Prod only — dev's existing login probes already cover dev, and extra logins against the shared marketplace test account risk tripping bot protection."
+  description = "Whether to create the NEO-43 synthetic marketplace-login canary (dedicated invoker SA, credential secret shells, and two Cloud Scheduler jobs). Prod only — dev's existing per-PR and per-push login probes already cover dev, so a dev canary would add cost and noise without new signal."
   type        = bool
   default     = false
 }
@@ -238,28 +243,32 @@ variable "enable_login_canary" {
 # `gcloud scheduler jobs pause` — but note the NEXT APPLY REVERTS IT, so a
 # pause must always be followed by this flag.
 variable "login_canary_paused" {
-  description = "Pause the NEO-43 login canary jobs without destroying them. Set true to stop marketplace logins immediately — e.g. when error_class=\"challenge\" shows the test account has been challenged by bot protection, in which case continuing to probe digs the hole deeper."
+  description = "Pause the NEO-43 login canary jobs without destroying them. Set true to stop the synthetic logins immediately — e.g. while debugging a marketplace-side outage, or when the canary itself is generating noise during an incident, so its failures don't drown the real signal."
   type        = bool
   default     = false
 }
 
-# Staggered 15 minutes apart so BSC and SportLots never log in simultaneously
-# from the browser service's shared egress IP — concurrent logins from one
-# identity is part of what NEO-29 looked like from the marketplace's side.
+# Every 30 minutes per platform, staggered 15 minutes apart. With ~65 min
+# worst-case detection (the policy needs repeated failures) this is the right
+# trade for a service with no on-call rotation, at ~$3/mo.
 #
-# Defaults are the HOURLY ramp-up cadence, not the steady state. Tighten to
-# every 30 minutes ("7,37 * * * *" / "22,52 * * * *") only after a clean week
-# with no error_class="challenge" on the canary.
+# The stagger is NOT about marketplace throttling — neither site throttles.
+# It is about OUR side: concurrent SportLots logins from the same egress IP
+# have produced "Not a valid Email Address" / zero-cookie failures in this
+# project before (a shared HTTP-state bug on our end). Keeping the two
+# platforms — and the canary vs. CI's deploy-time login probes — from
+# overlapping avoids reproducing that, and keeps a canary failure meaning
+# "the marketplace broke" rather than "we raced ourselves".
 variable "login_canary_schedule_bsc" {
-  description = "Cron schedule (UTC) for the NEO-43 BSC login canary. Offset from the SportLots schedule so the two never log in simultaneously. Defaults to hourly for initial rollout; tighten to 30-minute cadence once the marketplaces have tolerated it for a week."
+  description = "Cron schedule (UTC) for the NEO-43 BSC login canary. Offset from the SportLots schedule so the two never log in concurrently — concurrent logins have previously exposed a shared-HTTP-state bug on our side, not any marketplace throttling."
   type        = string
-  default     = "7 * * * *"
+  default     = "7,37 * * * *"
 }
 
 variable "login_canary_schedule_sportlots" {
-  description = "Cron schedule (UTC) for the NEO-43 SportLots login canary. Offset 15 minutes from the BSC schedule. Defaults to hourly for initial rollout."
+  description = "Cron schedule (UTC) for the NEO-43 SportLots login canary. Offset 15 minutes from the BSC schedule so the two never log in concurrently."
   type        = string
-  default     = "22 * * * *"
+  default     = "22,52 * * * *"
 }
 
 # MUST stay ≳3x the canary interval or ordinary jitter pages you. Default
@@ -267,9 +276,9 @@ variable "login_canary_schedule_sportlots" {
 # tightened to every 30 minutes, tighten this to 5400s (90m) IN THE SAME PR —
 # they are one setting expressed in two places.
 variable "login_canary_absence_duration" {
-  description = "How long the NEO-43 canary may go silent before the absence policy fires. This is the alert that catches a HUNG service — a hung login writes no log line, so silence is the only symptom — but it is meaningless unless the canary is actually running, which is why the policy is also gated on login_canary_paused being false. Keep at roughly 3x the canary interval."
+  description = "How long the NEO-43 canary may go silent before the absence policy fires. This is the alert that catches a HUNG service — a hung login writes no log line, so silence is the only symptom — but it is meaningless unless the canary is actually running, which is why the policy is also gated on login_canary_paused being false. Keep at roughly 3x the canary interval; 5400s = 3 missed runs at the 30-minute cadence."
   type        = string
-  default     = "10800s"
+  default     = "5400s"
 }
 
 variable "login_canary_attempt_deadline" {
