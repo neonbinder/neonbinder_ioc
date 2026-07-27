@@ -19,8 +19,11 @@ common_labels = {
   environment = "production"
   managed_by  = "terraform"
 }
-# NEO-43 item 4: synthetic login canary — prod only. Lands PAUSED so the
-# credential secrets can be seeded before the first real marketplace login;
-# unpause in a follow-up once `gcloud secrets versions list` shows a value.
+# NEO-43 item 4: synthetic login canary — prod only.
+# Credential secrets seeded 2026-07-27 (one enabled version each), so the
+# canary is live. Unpausing also brings up the canary-absence alert policy,
+# which is gated on the canary actually running — a paused canary emits
+# nothing, so that policy alongside a paused job would be a guaranteed false
+# alarm.
 enable_login_canary = true
-login_canary_paused = true
+login_canary_paused = false
