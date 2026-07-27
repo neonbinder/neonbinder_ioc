@@ -1143,6 +1143,886 @@ resource "google_bigquery_dataset" "billing_export" {
 }
 
 # ──────────────────────────────────────────────
+# Browser login alerting — resources (NEO-43)
+# ──────────────────────────────────────────────
+#
+# Alerts on marketplace (SportLots / BSC) login failures and HANGS on the
+# browser service. Prod only, count-gated; the IAM and API enablement these
+# depend on shipped in a prior PR (see the "IAM + APIs" section above) so the
+# grants have propagated before anything here is created.
+#
+# Three design constraints drove this, all verified against the running code
+# rather than taken from the ticket, which predates the BSC/SportLots
+# browser-free HTTP conversion:
+#
+#   1. HANGS EMIT NO LOG LINE. logBrowserOp (services/browser/src/
+#      observability.ts) writes its line only when the handler RETURNS. There
+#      is no server-side timeout on the login path, so a wedged upstream fetch
+#      holds the request open until Cloud Run kills it — and no
+#      browser_login_call entry is ever written. A metric on success=false
+#      therefore catches 100% of failures and 0% of hangs. Hangs are caught
+#      instead by the Cloud Run *request* log (browser_login_http_status).
+#
+#   2. A BAD BSC PASSWORD RETURNS HTTP 500, while the equivalent SportLots
+#      failure returns HTTP 400 (services/browser/src/index.ts). So the
+#      ticket's proposed "elevated 5xx rate on /login/*" policy would page on
+#      ordinary seller typos AND miss every SportLots failure. 500 is
+#      excluded from the hang policy for exactly this reason.
+#
+#   3. run.googleapis.com/request_count HAS NO PATH LABEL — its labels are
+#      response_code / response_code_class plus the cloud_run_revision
+#      resource labels. Since this service also serves /health, /sites and
+#      the /credentials/* CRUD routes, any built-in-metric policy is a
+#      service-wide aggregate in which two slow logins a day are invisible.
+#      That is why all four policies below are built on log-based metrics.
+#
+# Cost: log-based metrics over already-ingested logs, alert policies and
+# email channels are all free. Only the canary's Cloud Run time is billable
+# (~$3/mo) — relevant given NEO-95's cost posture.
+
+resource "google_monitoring_notification_channel" "ops_email" {
+  count        = var.enable_browser_login_alerts ? 1 : 0
+  project      = var.gcp_project_id
+  display_name = "NeonBinder ops email"
+  type         = "email"
+  description  = "NEO-43: operator mailbox for browser-service marketplace login alerts."
+
+  labels = {
+    email_address = var.alert_notification_email
+  }
+
+  # Unlike NEO-95's budget — which deliberately shipped with no channel and
+  # falls back to emailing the billing account's admins — an alert policy has
+  # NO fallback. A policy with no channel opens an incident that nobody ever
+  # sees. force_delete=false makes Terraform refuse to delete a channel that
+  # policies still reference rather than silently orphaning them into that
+  # no-notification state.
+  force_delete = false
+
+  user_labels = merge(var.common_labels, { ticket = "neo-43" })
+
+  depends_on = [
+    google_project_iam_member.tf_deployer_monitoring_channel_editor,
+    google_project_service.monitoring_api,
+  ]
+}
+
+# --- Log-based metrics ------------------------------------------------------
+
+# Counts browser_login_call lines with success=false. Catches every FAILURE
+# the service actually returned; blind to hangs by construction (see note 1).
+#
+# Deliberately NOT pinned to logName=".../run.googleapis.com%2Fstdout": if the
+# service ever switches to a logging library that writes elsewhere, a logName
+# pin would silently drop this metric to zero — and a monitoring rule that
+# silently reads zero is worse than no rule at all.
+resource "google_logging_metric" "browser_login_failures" {
+  count   = var.enable_browser_login_alerts ? 1 : 0
+  project = var.gcp_project_id
+  name    = "browser_login_failures"
+
+  filter = <<-EOT
+    resource.type="cloud_run_revision"
+    resource.labels.service_name="${var.cloud_run_service_name}"
+    jsonPayload.msg="browser_login_call"
+    jsonPayload.success=false
+  EOT
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "INT64"
+    unit         = "1"
+    display_name = "Browser marketplace login failures"
+
+    labels {
+      key         = "platform"
+      value_type  = "STRING"
+      description = "bsc | sportlots"
+    }
+    labels {
+      key         = "error_class"
+      value_type  = "STRING"
+      description = "bad_key_format | timeout | invalid_credentials | challenge | oom | other | missing_key; empty when the service could not classify"
+    }
+    labels {
+      key         = "challenge_detected"
+      value_type  = "STRING"
+      description = "true when the marketplace served a captcha/block page rather than authenticating — distinguishes 'they are blocking us' from 'the seller mistyped their password'"
+    }
+    labels {
+      key         = "canary"
+      value_type  = "STRING"
+      description = "true for the synthetic Cloud Scheduler probe, false for real seller traffic"
+    }
+  }
+
+  label_extractors = {
+    "platform"           = "EXTRACT(jsonPayload.platform)"
+    "error_class"        = "EXTRACT(jsonPayload.error_class)"
+    "challenge_detected" = "EXTRACT(jsonPayload.challenge_detected)"
+    "canary"             = "EXTRACT(jsonPayload.canary)"
+  }
+
+  depends_on = [google_project_iam_member.tf_deployer_logging_config_writer]
+}
+
+# Duration distribution for COMPLETED logins. Feeds the "slow but not yet
+# hung" policy.
+#
+# Uses jsonPayload.duration_ms (measured from handler entry) rather than
+# run.googleapis.com/request_latencies, which INCLUDES container startup.
+# With min-instances=0 (NEO-95 cost control) the canary mostly runs cold and
+# would otherwise dominate the service's p95 with pure cold-start time.
+resource "google_logging_metric" "browser_login_duration_ms" {
+  count   = var.enable_browser_login_alerts ? 1 : 0
+  project = var.gcp_project_id
+  name    = "browser_login_duration_ms"
+
+  filter = <<-EOT
+    resource.type="cloud_run_revision"
+    resource.labels.service_name="${var.cloud_run_service_name}"
+    jsonPayload.msg="browser_login_call"
+  EOT
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "DISTRIBUTION"
+    unit         = "ms"
+    display_name = "Browser marketplace login duration"
+
+    labels {
+      key         = "platform"
+      value_type  = "STRING"
+      description = "bsc | sportlots"
+    }
+    labels {
+      key         = "canary"
+      value_type  = "STRING"
+      description = "true for the synthetic probe, false for real seller traffic"
+    }
+  }
+
+  value_extractor = "EXTRACT(jsonPayload.duration_ms)"
+
+  label_extractors = {
+    "platform" = "EXTRACT(jsonPayload.platform)"
+    "canary"   = "EXTRACT(jsonPayload.canary)"
+  }
+
+  # 100ms .. 100 * 1.25^40 ≈ 752s at ~25% granularity per bucket. Fine enough
+  # that a p99 near the 45s threshold is accurate to ~±11s, wide enough to
+  # still bucket a request that ran to Cloud Run's 300s default timeout.
+  bucket_options {
+    exponential_buckets {
+      num_finite_buckets = 40
+      growth_factor      = 1.25
+      scale              = 100
+    }
+  }
+
+  depends_on = [google_project_iam_member.tf_deployer_logging_config_writer]
+}
+
+# THE HANG DETECTOR. The only path-scoped source that can see a request the
+# application never completed, because Cloud Run's *request* log records
+# requestUrl/status/latency independently of anything the app writes:
+#   499 — Convex aborted at its 60s AbortSignal (the seller saw a spinner,
+#         then an error)
+#   504 — Cloud Run's own request timeout (300s default; not set by terraform
+#         and not set by the deploy workflow's gcloud flags)
+#   503 — container died / overload mid-request
+#
+# Unlike the two metrics above, pinning logName IS correct here: request logs
+# are emitted by Cloud Run infrastructure, not by the app, so the log stream
+# cannot move under us.
+#
+# WHY THE FILTER IS >=400 AND NOT >=499: an audit of 30 days of prod request
+# logs (2026-07-26) found 19 requests to /login/*, ALL of them HTTP 200 — not
+# one non-2xx. So the status set the hang policy matches (499|502|503|504) is
+# currently an UNVERIFIED HYPOTHESIS: there is no observed example of what
+# Cloud Run records when Convex aborts at 60s, and if it turns out to be
+# something else the policy would silently never fire.
+#
+# Capturing from 400 costs nothing (log-based metrics over already-ingested
+# logs are free) and builds the evidence base to tune against. The POLICY is
+# unchanged — it still filters to 499|502|503|504 — so this widening adds
+# observability only, never new pages. Revisit the status set once real
+# non-2xx data exists.
+resource "google_logging_metric" "browser_login_http_status" {
+  count   = var.enable_browser_login_alerts ? 1 : 0
+  project = var.gcp_project_id
+  name    = "browser_login_http_status"
+
+  filter = <<-EOT
+    resource.type="cloud_run_revision"
+    resource.labels.service_name="${var.cloud_run_service_name}"
+    logName="projects/${var.gcp_project_id}/logs/run.googleapis.com%2Frequests"
+    httpRequest.requestUrl=~"/login/(bsc|sportlots)$"
+    httpRequest.status>=400
+  EOT
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "INT64"
+    unit         = "1"
+    display_name = "Browser login request failures (Cloud Run edge)"
+
+    labels {
+      key         = "status"
+      value_type  = "STRING"
+      description = "499 client-cancelled | 502/503 infra | 504 request timeout | 500 app error"
+    }
+    labels {
+      key         = "path"
+      value_type  = "STRING"
+      description = "/login/bsc | /login/sportlots"
+    }
+  }
+
+  label_extractors = {
+    "status" = "EXTRACT(httpRequest.status)"
+    "path"   = "REGEXP_EXTRACT(httpRequest.requestUrl, \"(/login/[a-z]+)\")"
+  }
+
+  depends_on = [google_project_iam_member.tf_deployer_logging_config_writer]
+}
+
+# --- Runbook ----------------------------------------------------------------
+#
+# NOTE ON ESCAPING: Cloud Monitoring's own documentation-variable syntax
+# (${metric.label.platform}) collides with Terraform interpolation, so every
+# Monitoring variable below is written $${...}. Unescaped, the apply fails
+# with "There is no variable named metric".
+
+locals {
+  neo43_runbook_common = <<-EOT
+    ## Where to look
+
+    **1. Structured login logs** — what the service thought happened.
+    Logs Explorer, project `${var.gcp_project_id}`:
+
+    ```
+    resource.type="cloud_run_revision"
+    resource.labels.service_name="${var.cloud_run_service_name}"
+    jsonPayload.msg="browser_login_call"
+    ```
+
+    Fields: `platform`, `operation`, `duration_ms`, `success`, `status_code`,
+    `error_class`, `challenge_detected`, `canary`.
+
+    **A HANG EMITS NO LINE AT ALL.** If an alert fired and there is no matching
+    entry, that absence IS the finding — go to (2).
+
+    **2. Cloud Run request log** — the only place a hang is visible:
+
+    ```
+    resource.type="cloud_run_revision"
+    resource.labels.service_name="${var.cloud_run_service_name}"
+    logName="projects/${var.gcp_project_id}/logs/run.googleapis.com%2Frequests"
+    httpRequest.requestUrl=~"/login/"
+    ```
+
+    499 = Convex gave up at 60s. 504 = Cloud Run request timeout. 503 =
+    container died.
+
+    **3. PostHog** — events `credential_test_failed` / `credential_test_succeeded`
+    from apps/web/convex/credentials.ts. Filter by `platform`. NOTE the naming
+    mismatch: PostHog uses `buysportscards`, the browser service uses `bsc`.
+    PostHog carries the sanitized diagnostic (`challengeDetected`, url,
+    snippet) — the only place you can see WHAT page the marketplace served.
+
+    ## Check these before escalating
+
+    - **`challenge_detected=true` or `error_class="challenge"`** — the
+      marketplace is blocking us, not a credential problem. If the canary is
+      running, PAUSE IT FIRST (see below) before debugging, or you will dig
+      the hole deeper.
+    - **Did a push to `main` just happen?** `prod-login-probe` performs a real
+      BSC + SportLots login against a cold, freshly deployed revision on every
+      deploy. Correlate the alert time with the latest deploy.
+    - **Cold start.** min-instances=0 is intentional (NEO-95 cost control), so
+      the first login after an idle period is always the slowest.
+
+    ## Act
+
+    - Marketplace-side outage: nothing to deploy. Note it on the ticket.
+    - Our regression: `gcloud run services update-traffic ${var.cloud_run_service_name}
+      --region=${var.gcp_region} --project=${var.gcp_project_id} --to-revisions=<previous>=100`
+    - Pause the canary: set `login_canary_paused = true` in
+      environments/prod.tfvars and merge. Break-glass is
+      `gcloud scheduler jobs pause` — but the NEXT APPLY REVERTS IT, so always
+      follow up with the tfvars change.
+    - Silence this alert: `enable_browser_login_alerts` in prod.tfvars. Never
+      by editing in the console — the next apply reverts console edits.
+  EOT
+
+  neo43_doc_failures = <<-EOT
+    # Marketplace login failures — $${metric.label.platform}
+
+    3+ login failures in 5 minutes on **$${metric.label.platform}**, excluding
+    caller-side errors (invalid_credentials, bad_key_format, missing_key). A
+    seller is very likely stuck right now.
+
+    First: read `error_class` on the failing lines. `timeout` -> marketplace
+    slow or wedged. `challenge` -> captcha/bot check. `oom` -> container
+    memory. `other` -> read the raw message, it matched no known pattern.
+
+    ${local.neo43_runbook_common}
+  EOT
+
+  neo43_doc_hang = <<-EOT
+    # Login request died at the Cloud Run edge — $${metric.label.path}
+
+    Status **$${metric.label.status}** on `$${metric.label.path}`: a login
+    request terminated without the application ever returning.
+
+    499 means Convex's 60s abort fired — the seller saw a failure. There will
+    be NO browser_login_call log line for this request; that absence is the
+    diagnosis. Check whether the upstream marketplace is reachable at all.
+
+    500 is deliberately NOT part of this policy: an ordinary BSC credential
+    rejection returns 500 (SportLots returns 400 for the same case), so
+    including it would page on seller typos. Real application failures are
+    covered by the login-failures policy with a far better error taxonomy.
+
+    ${local.neo43_runbook_common}
+  EOT
+
+  neo43_doc_latency = <<-EOT
+    # Login latency degrading — $${metric.label.platform}
+
+    p99 login duration on **$${metric.label.platform}** exceeded
+    ${var.browser_login_latency_threshold_ms}ms over 10 minutes. Convex hard-aborts at
+    60s, so logins are close to failing outright.
+
+    Measured baseline from prod logs (2026-07-26, 30d): BSC 2.5-3.3s,
+    SportLots 1.2-1.5s. A cold start on the ~1GB image adds several seconds on
+    top (min-instances=0 is intentional, NEO-95). Anything in the tens of
+    seconds is far outside normal.
+
+    ${local.neo43_runbook_common}
+  EOT
+
+  neo43_doc_canary_absent = <<-EOT
+    # Login canary has stopped reporting
+
+    No synthetic login probe has completed for 90 minutes (3 missed runs).
+
+    This is the ABSENCE detector, and it is the one alert that fires when the
+    service is hung rather than erroring — a hung login writes no log line, so
+    the only symptom is silence. Either the browser service is wedged, the
+    Cloud Scheduler jobs are paused/deleted, or the canary's credentials or
+    Secret Manager access broke.
+
+    Check, in order:
+    1. `gcloud scheduler jobs list --location=${var.gcp_region} --project=${var.gcp_project_id}`
+       — are the jobs present and ENABLED (not PAUSED)?
+    2. The Scheduler job's own error log:
+       `resource.type="cloud_scheduler_job"` — an attempt abandoned at the
+       180s deadline is recorded here even when the service logs nothing.
+    3. Whether anyone paused the canary during an incident and forgot to
+       re-enable it.
+
+    ${local.neo43_runbook_common}
+  EOT
+}
+
+# --- Alert policies ---------------------------------------------------------
+#
+# Shared conventions across all four, each load-bearing at this traffic level:
+#
+#   evaluation_missing_data = INACTIVE — the provider default leaves a
+#     condition in its LAST state when data stops. With sparse login traffic
+#     that means an incident opened at 09:00 can stay open indefinitely once
+#     nobody logs in, and cannot cleanly re-fire. "No data" must read as "not
+#     violating", i.e. "nobody attempted a login".
+#
+#   auto_close = 1800s — the API minimum. These are burst counters over sparse
+#     traffic; an incident that is not closed quickly is still open when the
+#     next unrelated failure arrives, and that second failure then produces NO
+#     new email.
+#
+#   duration = "0s" + trigger.count = 1 — never require N CONSECUTIVE
+#     violating windows. The second window may have no data at all, so a
+#     duration-based condition could sit un-fired straight through an outage.
+#
+#   notification_rate_limit = 3600s — caps a sustained outage at one email an
+#     hour per policy.
+#
+# Deliberately NOT built: any ratio/rate condition. At single-digit daily
+# logins, "50% error rate" is one failed login and the ratio is undefined for
+# most windows. Absolute counts only.
+
+resource "google_monitoring_alert_policy" "browser_login_failures" {
+  count        = var.enable_browser_login_alerts ? 1 : 0
+  project      = var.gcp_project_id
+  display_name = "browser-service: marketplace login failures (NEO-43)"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "3+ non-user-error login failures in 5m (per platform)"
+
+    condition_threshold {
+      # The error_class exclusions are what make this alert survivable.
+      # invalid_credentials / bad_key_format / missing_key are all CALLER
+      # errors — a seller mistyped a password, or Convex sent a malformed
+      # key. Paging on those would make this alert ignored within a week.
+      # Everything else — timeout, challenge, oom, other, and the empty
+      # string the service yields when it cannot classify — is a genuine
+      # "the marketplace or our service is broken" signal.
+      filter = join(" AND ", [
+        # Interpolated rather than hardcoded so Terraform knows this policy
+        # DEPENDS ON the metric. Without that edge it may create the policy
+        # first, and Cloud Monitoring happily accepts a filter naming a
+        # metric type that does not exist yet — producing a policy that never
+        # matches anything and reports healthy forever.
+        "metric.type=\"logging.googleapis.com/user/${google_logging_metric.browser_login_failures[0].name}\"",
+        "resource.type=\"cloud_run_revision\"",
+        "metric.label.error_class!=\"invalid_credentials\"",
+        "metric.label.error_class!=\"bad_key_format\"",
+        "metric.label.error_class!=\"missing_key\"",
+      ])
+
+      comparison      = "COMPARISON_GT"
+      threshold_value = 2
+      duration        = "0s"
+
+      aggregations {
+        alignment_period     = "300s"
+        per_series_aligner   = "ALIGN_DELTA"
+        cross_series_reducer = "REDUCE_SUM"
+        # Per-platform: BSC and SportLots break independently — the incident
+        # that prompted NEO-43 was SportLots hanging while BSC was healthy. A
+        # summed threshold would need to be lower and would then double-fire.
+        group_by_fields = ["metric.label.platform"]
+      }
+
+      trigger {
+        count = 1
+      }
+
+      evaluation_missing_data = "EVALUATION_MISSING_DATA_INACTIVE"
+    }
+  }
+
+  notification_channels = [google_monitoring_notification_channel.ops_email[0].id]
+
+  alert_strategy {
+    auto_close = "1800s"
+
+    notification_rate_limit {
+      period = "3600s"
+    }
+  }
+
+  documentation {
+    mime_type = "text/markdown"
+    content   = local.neo43_doc_failures
+  }
+
+  user_labels = merge(var.common_labels, { ticket = "neo-43" })
+
+  depends_on = [google_project_iam_member.tf_deployer_monitoring_alert_editor]
+}
+
+resource "google_monitoring_alert_policy" "browser_login_hang" {
+  count        = var.enable_browser_login_alerts ? 1 : 0
+  project      = var.gcp_project_id
+  display_name = "browser-service: login hang / edge failure (NEO-43)"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "Any 499/502/503/504 on a /login/* request in 5m"
+
+    condition_threshold {
+      filter = join(" AND ", [
+        # Interpolated so Terraform creates the metric first — see the note on
+        # the failures policy above.
+        "metric.type=\"logging.googleapis.com/user/${google_logging_metric.browser_login_http_status[0].name}\"",
+        "resource.type=\"cloud_run_revision\"",
+        # 500 EXCLUDED — see the note at the top of this section: an ordinary
+        # BSC credential rejection is a 500. None of 499/502/503/504 can be
+        # produced by user input.
+        "metric.label.status=monitoring.regex.full_match(\"499|502|503|504\")",
+      ])
+
+      comparison = "COMPARISON_GT"
+      # Zero legitimate baseline — every one of these is the NEO-43 incident,
+      # and at this volume it will be quiet for weeks at a time.
+      threshold_value = 0
+      duration        = "0s"
+
+      aggregations {
+        alignment_period     = "300s"
+        per_series_aligner   = "ALIGN_DELTA"
+        cross_series_reducer = "REDUCE_SUM"
+        group_by_fields      = ["metric.label.path", "metric.label.status"]
+      }
+
+      trigger {
+        count = 1
+      }
+
+      evaluation_missing_data = "EVALUATION_MISSING_DATA_INACTIVE"
+    }
+  }
+
+  notification_channels = [google_monitoring_notification_channel.ops_email[0].id]
+
+  alert_strategy {
+    auto_close = "1800s"
+
+    notification_rate_limit {
+      period = "3600s"
+    }
+  }
+
+  documentation {
+    mime_type = "text/markdown"
+    content   = local.neo43_doc_hang
+  }
+
+  user_labels = merge(var.common_labels, { ticket = "neo-43" })
+
+  depends_on = [google_project_iam_member.tf_deployer_monitoring_alert_editor]
+}
+
+resource "google_monitoring_alert_policy" "browser_login_latency" {
+  count        = var.enable_browser_login_alerts ? 1 : 0
+  project      = var.gcp_project_id
+  display_name = "browser-service: login latency degradation (NEO-43)"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "p99 login duration > threshold over 10m (per platform)"
+
+    condition_threshold {
+      filter = join(" AND ", [
+        # Interpolated so Terraform creates the metric first — see the note on
+        # the failures policy above.
+        "metric.type=\"logging.googleapis.com/user/${google_logging_metric.browser_login_duration_ms[0].name}\"",
+        "resource.type=\"cloud_run_revision\"",
+      ])
+
+      comparison      = "COMPARISON_GT"
+      threshold_value = var.browser_login_latency_threshold_ms
+      duration        = "0s"
+
+      aggregations {
+        # 10m (vs 5m elsewhere) because this is a trend signal, not an
+        # incident signal.
+        alignment_period = "600s"
+        # ALIGN_PERCENTILE_99 precisely BECAUSE volume is low: with 1-3
+        # samples in the window, p99 degenerates to "the slowest login in the
+        # window", which is exactly the semantic wanted. (ALIGN_MAX is not
+        # valid for DISTRIBUTION-valued metrics.)
+        per_series_aligner   = "ALIGN_PERCENTILE_99"
+        cross_series_reducer = "REDUCE_MAX"
+        group_by_fields      = ["metric.label.platform"]
+      }
+
+      trigger {
+        count = 1
+      }
+
+      evaluation_missing_data = "EVALUATION_MISSING_DATA_INACTIVE"
+    }
+  }
+
+  notification_channels = [google_monitoring_notification_channel.ops_email[0].id]
+
+  alert_strategy {
+    auto_close = "1800s"
+
+    notification_rate_limit {
+      period = "3600s"
+    }
+  }
+
+  documentation {
+    mime_type = "text/markdown"
+    content   = local.neo43_doc_latency
+  }
+
+  user_labels = merge(var.common_labels, { ticket = "neo-43" })
+
+  depends_on = [google_project_iam_member.tf_deployer_monitoring_alert_editor]
+}
+
+# The absence detector. This is the policy that fires when the service is HUNG
+# rather than erroring — and it is only meaningful because the canary
+# guarantees a heartbeat. Without a synthetic probe, "no login logs" is
+# indistinguishable from "no sellers logged in today".
+resource "google_monitoring_alert_policy" "browser_login_canary_absent" {
+  # Gated on the canary being ENABLED AND NOT PAUSED. A paused canary emits
+  # nothing by design, so creating this policy alongside a paused canary would
+  # guarantee a false alarm one window later — the monitoring causing the
+  # incident. It also means the documented "pause the canary" incident
+  # response does not itself page you an hour afterwards.
+  count        = var.enable_browser_login_alerts && var.enable_login_canary && !var.login_canary_paused ? 1 : 0
+  project      = var.gcp_project_id
+  display_name = "browser-service: login canary stopped reporting (NEO-43)"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "No canary login completed within the absence window"
+
+    condition_absent {
+      filter = join(" AND ", [
+        # Interpolated so Terraform creates the metric first — see the note on
+        # the failures policy above. Doubly important here: an absence policy
+        # pointed at a non-existent metric type sees permanent absence, so the
+        # ordering bug would not fail quietly — it would page immediately.
+        "metric.type=\"logging.googleapis.com/user/${google_logging_metric.browser_login_duration_ms[0].name}\"",
+        "resource.type=\"cloud_run_revision\"",
+        "metric.label.canary=\"true\"",
+      ])
+
+      # Must be ≳3x the canary interval, or normal jitter pages you. See the
+      # variable's description — this has to be retightened in the same PR
+      # that tightens the schedules.
+      duration = var.login_canary_absence_duration
+
+      aggregations {
+        alignment_period   = "600s"
+        per_series_aligner = "ALIGN_COUNT"
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+
+  notification_channels = [google_monitoring_notification_channel.ops_email[0].id]
+
+  alert_strategy {
+    auto_close = "1800s"
+
+    notification_rate_limit {
+      period = "3600s"
+    }
+  }
+
+  documentation {
+    mime_type = "text/markdown"
+    content   = local.neo43_doc_canary_absent
+  }
+
+  user_labels = merge(var.common_labels, { ticket = "neo-43" })
+
+  depends_on = [google_project_iam_member.tf_deployer_monitoring_alert_editor]
+}
+
+# ──────────────────────────────────────────────
+# Synthetic marketplace-login canary (NEO-43)
+# ──────────────────────────────────────────────
+#
+# Cloud Scheduler drives POST /login/{bsc,sportlots} on a dedicated, non-user
+# credential key. Without it, the only thing exercising marketplace login in
+# prod is `prod-login-probe`, which runs at DEPLOY time — between deploys a
+# break is silent until a seller reports it.
+#
+# The request body carries `canary: true`, which makes the browser service
+# skip BOTH halves of the adapters' token cache. That flag is not a
+# convenience, it is what makes the probe meaningful:
+#   - SportLots caches its session cookie for 30 DAYS, so a cache-honouring
+#     canary would exercise the real SportLots login roughly once a month.
+#   - Each fresh login would otherwise write a new permanently-enabled Secret
+#     Manager version ($0.06/version/month), costing more at this cadence
+#     than the rest of this infrastructure combined.
+#
+# Canary failures produce ordinary browser_login_call lines and Cloud Run
+# request metrics, so they feed the policies above with no extra wiring; the
+# `canary` metric label is what lets those policies tell synthetic from real.
+
+resource "google_service_account" "login_canary" {
+  count        = var.enable_login_canary ? 1 : 0
+  account_id   = "neonbinder-login-canary"
+  display_name = "NeonBinder Login Canary"
+  description  = "NEO-43: Cloud Scheduler identity for the synthetic marketplace-login canary. Sole permission is run.invoker on the browser service."
+}
+
+# Scoped to the service, never a project-level grant — same shape as
+# runtime_invoker / convex_invoker / deployer_invoker above. A dedicated
+# principal means revoking this ONE binding is an instant kill switch with
+# zero blast radius on real traffic, and Cloud Audit Logs attribute canary
+# invocations unambiguously.
+#
+# It needs NO Secret Manager access: the browser RUNTIME service account reads
+# the credential secret, not the caller.
+resource "google_cloud_run_service_iam_member" "login_canary_invoker" {
+  count    = var.enable_login_canary ? 1 : 0
+  location = google_cloud_run_service.neonbinder_browser.location
+  service  = google_cloud_run_service.neonbinder_browser.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.login_canary[0].email}"
+}
+
+# roles/iam.serviceAccountAdmin (held project-wide by the tf-deployer) does
+# NOT include serviceAccounts.actAs, which is required to reference this SA in
+# a Scheduler job's oidc_token.
+resource "google_service_account_iam_member" "tf_deployer_act_as_login_canary" {
+  count              = var.enable_login_canary ? 1 : 0
+  service_account_id = google_service_account.login_canary[0].name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+# Credential secret SHELLS only — same pattern as the internal_api_key secret
+# above. The username/password are added out of band and never touch tfvars or
+# Terraform state:
+#
+#   printf '{"username":"...","password":"..."}' | \
+#     gcloud secrets versions add bsc-credentials-canary \
+#       --data-file=- --project=neonbinder
+#
+# The JSON shape is required by SecretsManagerService.getCredentials, which
+# throws "Invalid credentials format" without both fields. The names match
+# KEY_PATTERN /^[a-z0-9]+-credentials-[a-zA-Z0-9_-]+$/ in
+# services/browser/src/services/secrets-manager.ts.
+#
+# The "canary" userId segment intentionally corresponds to NO Clerk/Convex
+# user — Convex builds keys from Clerk ids (user_...), so collision with a
+# real seller is impossible. It is also the rate-limit bucket key, so the
+# canary can never consume a real seller's 60/min budget.
+resource "google_secret_manager_secret" "login_canary_bsc" {
+  count     = var.enable_login_canary ? 1 : 0
+  project   = var.gcp_project_id
+  secret_id = "bsc-credentials-canary"
+
+  replication {
+    auto {}
+  }
+
+  labels = var.common_labels
+}
+
+resource "google_secret_manager_secret" "login_canary_sportlots" {
+  count     = var.enable_login_canary ? 1 : 0
+  project   = var.gcp_project_id
+  secret_id = "sportlots-credentials-canary"
+
+  replication {
+    auto {}
+  }
+
+  labels = var.common_labels
+}
+
+locals {
+  # Cloud Run validates the OIDC token audience against the BASE service URL.
+  # It must NOT include the /login/... path or the request is rejected with
+  # 401 before ever reaching Express — the same constraint apps/web/convex/
+  # browserAudience.ts exists to normalize on the Convex side.
+  login_canary_audience = var.enable_login_canary ? google_cloud_run_service.neonbinder_browser.status[0].url : ""
+}
+
+# retry_count = 0 is load-bearing, not a default — but NOT for rate-limit or
+# anti-abuse reasons. Neither BSC nor SportLots throttles logins, and there is
+# no such thing as BSC "bot protection"; that belief has been raised and
+# disproven repeatedly on this project, and anywhere it survives in a comment
+# it should be treated as wrong.
+#
+# The real reason is monitoring correctness. Scheduler retries would hide an
+# intermittently-failing marketplace behind a green canary — the canary would
+# quietly succeed on attempt 2 and report nothing, which is the exact opposite
+# of what a probe is for. One attempt per run means every failure is visible;
+# genuine one-off blips are absorbed by the alert policy, which needs repeated
+# failures before it fires.
+#
+# attempt_deadline is deliberately SHORTER than Cloud Run's 300s request
+# timeout, which gives a second, service-independent hang detector: Scheduler
+# abandons the attempt and writes a non-OK AttemptFinished entry under
+# resource.type="cloud_scheduler_job" even if the browser service is logging
+# nothing at all.
+resource "google_cloud_scheduler_job" "login_canary_bsc" {
+  count            = var.enable_login_canary ? 1 : 0
+  project          = var.gcp_project_id
+  name             = "neonbinder-login-canary-bsc"
+  region           = var.gcp_region
+  description      = "NEO-43: exercises the real BSC Azure AD B2C login so a break is detected without waiting for seller traffic."
+  schedule         = var.login_canary_schedule_bsc
+  time_zone        = "Etc/UTC"
+  attempt_deadline = var.login_canary_attempt_deadline
+  paused           = var.login_canary_paused
+
+  retry_config {
+    retry_count = 0
+  }
+
+  http_target {
+    http_method = "POST"
+    uri         = "${google_cloud_run_service.neonbinder_browser.status[0].url}/login/bsc"
+
+    # Without this header express.json() leaves req.body empty and the service
+    # returns 400 "Missing required field: key" — a permanently red canary.
+    headers = {
+      "Content-Type" = "application/json"
+    }
+
+    body = base64encode(jsonencode({
+      key    = "bsc-credentials-canary"
+      canary = true
+    }))
+
+    oidc_token {
+      service_account_email = google_service_account.login_canary[0].email
+      audience              = local.login_canary_audience
+    }
+  }
+
+  depends_on = [
+    google_project_service.cloudscheduler_api,
+    google_project_iam_member.tf_deployer_cloudscheduler_admin,
+    google_service_account_iam_member.tf_deployer_act_as_login_canary,
+    google_cloud_run_service_iam_member.login_canary_invoker,
+  ]
+}
+
+resource "google_cloud_scheduler_job" "login_canary_sportlots" {
+  count            = var.enable_login_canary ? 1 : 0
+  project          = var.gcp_project_id
+  name             = "neonbinder-login-canary-sportlots"
+  region           = var.gcp_region
+  description      = "NEO-43: exercises the real SportLots signin form. Without the canary flag this would hit the adapter's 30-DAY cookie cache and never touch the login endpoint at all."
+  schedule         = var.login_canary_schedule_sportlots
+  time_zone        = "Etc/UTC"
+  attempt_deadline = var.login_canary_attempt_deadline
+  paused           = var.login_canary_paused
+
+  retry_config {
+    retry_count = 0
+  }
+
+  http_target {
+    http_method = "POST"
+    uri         = "${google_cloud_run_service.neonbinder_browser.status[0].url}/login/sportlots"
+
+    headers = {
+      "Content-Type" = "application/json"
+    }
+
+    body = base64encode(jsonencode({
+      key    = "sportlots-credentials-canary"
+      canary = true
+    }))
+
+    oidc_token {
+      service_account_email = google_service_account.login_canary[0].email
+      audience              = local.login_canary_audience
+    }
+  }
+
+  depends_on = [
+    google_project_service.cloudscheduler_api,
+    google_project_iam_member.tf_deployer_cloudscheduler_admin,
+    google_service_account_iam_member.tf_deployer_act_as_login_canary,
+    google_cloud_run_service_iam_member.login_canary_invoker,
+  ]
+}
+
+# ──────────────────────────────────────────────
 # Outputs
 # ──────────────────────────────────────────────
 
