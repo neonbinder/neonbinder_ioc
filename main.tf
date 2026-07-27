@@ -1377,9 +1377,27 @@ resource "google_logging_metric" "browser_login_http_status" {
     display_name = "Browser login request failures (Cloud Run edge)"
 
     labels {
-      key         = "status"
-      value_type  = "STRING"
-      description = "499 client-cancelled | 500 uncaught app error | 502 upstream marketplace fault | 503 infra | 504 request timeout (422 = credential rejection, never matched here)"
+      key        = "status"
+      value_type = "STRING"
+      # ⚠️ DO NOT EDIT THIS DESCRIPTION.
+      #
+      # Any change inside a `labels` block is ForceNew on
+      # google_logging_metric — including the description text alone, with
+      # `key` and `value_type` untouched. Terraform destroys and recreates the
+      # metric. Log-based metrics do NOT backfill, so the recreated series
+      # starts empty and every alert policy built on it goes quiet until new
+      # data accumulates. At current volumes (19 /login/* requests in 30 days)
+      # that is a long blind window for a one-line doc tweak.
+      #
+      # NEO-98 tried to update this wording and the prod plan came back
+      # "1 to destroy" — reverted, deliberately.
+      #
+      # The text below therefore predates NEO-98 and is knowingly stale. Since
+      # NEO-98: a credential rejection is 422 (4xx — never matched by any
+      # policy here), 500 means only an uncaught throw in our own code, and
+      # 502 means an upstream marketplace fault. Correct the wording only when
+      # the metric is being recreated for some independent reason.
+      description = "499 client-cancelled | 502/503 infra | 504 request timeout | 500 app error"
     }
     labels {
       key         = "path"
