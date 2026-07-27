@@ -1531,20 +1531,33 @@ locals {
 #
 # Shared conventions across all four, each load-bearing at this traffic level:
 #
-#   evaluation_missing_data = INACTIVE — the provider default leaves a
-#     condition in its LAST state when data stops. With sparse login traffic
-#     that means an incident opened at 09:00 can stay open indefinitely once
-#     nobody logs in, and cannot cleanly re-fire. "No data" must read as "not
-#     violating", i.e. "nobody attempted a login".
-#
-#   auto_close = 1800s — the API minimum. These are burst counters over sparse
-#     traffic; an incident that is not closed quickly is still open when the
-#     next unrelated failure arrives, and that second failure then produces NO
-#     new email.
-#
 #   duration = "0s" + trigger.count = 1 — never require N CONSECUTIVE
 #     violating windows. The second window may have no data at all, so a
 #     duration-based condition could sit un-fired straight through an outage.
+#
+#   NO evaluation_missing_data — and this is FORCED, not a preference. The
+#     Monitoring API rejects the combination outright:
+#       "Conditions setting evaluation_missing_data must have a non-zero
+#        duration."
+#     (Learned the hard way: a prod apply failed on exactly this. Note that
+#     `terraform validate` cannot catch it — it is a server-side semantic
+#     rule, not a schema rule, so it passes plan and fails apply.)
+#
+#     Given the forced choice, duration="0s" wins. With alignment_period=300s
+#     a non-zero duration means "violating across consecutive 5-minute
+#     windows", and at this traffic level the next window routinely has no
+#     data at all — so a genuine burst would open no incident. Failing to fire
+#     during an outage is far worse than an incident lingering.
+#
+#     What we give up is the explicit "no data ⇒ not violating" declaration;
+#     the default is that missing data does not change the condition state.
+#     auto_close (below) covers the resulting stuck-incident risk.
+#
+#   auto_close = 1800s — the API minimum, and now doing double duty: it both
+#     keeps burst counters from holding an incident open (a still-open
+#     incident swallows the next burst's notification entirely) AND closes
+#     incidents once data stops, which is what evaluation_missing_data would
+#     otherwise have handled.
 #
 #   notification_rate_limit = 3600s — caps a sustained outage at one email an
 #     hour per policy.
@@ -1600,8 +1613,6 @@ resource "google_monitoring_alert_policy" "browser_login_failures" {
       trigger {
         count = 1
       }
-
-      evaluation_missing_data = "EVALUATION_MISSING_DATA_INACTIVE"
     }
   }
 
@@ -1662,8 +1673,6 @@ resource "google_monitoring_alert_policy" "browser_login_hang" {
       trigger {
         count = 1
       }
-
-      evaluation_missing_data = "EVALUATION_MISSING_DATA_INACTIVE"
     }
   }
 
@@ -1724,8 +1733,6 @@ resource "google_monitoring_alert_policy" "browser_login_latency" {
       trigger {
         count = 1
       }
-
-      evaluation_missing_data = "EVALUATION_MISSING_DATA_INACTIVE"
     }
   }
 
