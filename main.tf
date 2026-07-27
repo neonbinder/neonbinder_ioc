@@ -1163,11 +1163,19 @@ resource "google_bigquery_dataset" "billing_export" {
 #      therefore catches 100% of failures and 0% of hangs. Hangs are caught
 #      instead by the Cloud Run *request* log (browser_login_http_status).
 #
-#   2. A BAD BSC PASSWORD RETURNS HTTP 500, while the equivalent SportLots
-#      failure returns HTTP 400 (services/browser/src/index.ts). So the
-#      ticket's proposed "elevated 5xx rate on /login/*" policy would page on
-#      ordinary seller typos AND miss every SportLots failure. 500 is
-#      excluded from the hang policy for exactly this reason.
+#   2. LOGIN STATUS CODES CARRY MEANING (as of NEO-98). Both login routes in
+#      services/browser/src/index.ts now answer:
+#         422 — the marketplace processed the credentials and refused them,
+#               or the stored secret was incomplete. The seller's problem.
+#               4xx, so no policy here matches it. NEVER pages.
+#         502 — we could not complete the exchange: the marketplace returned
+#               something unusable, was unreachable, or served a block page.
+#         500 — an uncaught throw in our own code.
+#      Previously a bad BSC password returned 500 and the equivalent SportLots
+#      failure returned 400, which is why the hang policy below used to filter
+#      to 499|502|503|504 and EXCLUDE 500 — leaving it with no crash coverage,
+#      since a container dying mid-request was indistinguishable from a typo.
+#      With 500 now meaning only "our code broke", the policy matches all 5xx.
 #
 #   3. run.googleapis.com/request_count HAS NO PATH LABEL — its labels are
 #      response_code / response_code_class plus the cloud_run_revision
@@ -1338,16 +1346,17 @@ resource "google_logging_metric" "browser_login_duration_ms" {
 #
 # WHY THE FILTER IS >=400 AND NOT >=499: an audit of 30 days of prod request
 # logs (2026-07-26) found 19 requests to /login/*, ALL of them HTTP 200 — not
-# one non-2xx. So the status set the hang policy matches (499|502|503|504) is
-# currently an UNVERIFIED HYPOTHESIS: there is no observed example of what
-# Cloud Run records when Convex aborts at 60s, and if it turns out to be
-# something else the policy would silently never fire.
+# one non-2xx. So the status set the hang policy matches (499 + 5xx) is still
+# an UNVERIFIED HYPOTHESIS: there is no observed example of what Cloud Run
+# records when Convex aborts at 60s, and if it turns out to be something else
+# the policy would silently never fire.
 #
 # Capturing from 400 costs nothing (log-based metrics over already-ingested
-# logs are free) and builds the evidence base to tune against. The POLICY is
-# unchanged — it still filters to 499|502|503|504 — so this widening adds
-# observability only, never new pages. Revisit the status set once real
-# non-2xx data exists.
+# logs are free) and builds the evidence base to tune against. It is also now
+# the only place the 422 rejection volume shows up, which is worth having:
+# a sudden collapse in 422s is itself a signal that logins stopped reaching
+# the marketplace at all. The policy never matches 4xx, so this stays
+# observability-only and adds no pages. Revisit once real non-2xx data exists.
 resource "google_logging_metric" "browser_login_http_status" {
   count   = var.enable_browser_login_alerts ? 1 : 0
   project = var.gcp_project_id
@@ -1370,7 +1379,7 @@ resource "google_logging_metric" "browser_login_http_status" {
     labels {
       key         = "status"
       value_type  = "STRING"
-      description = "499 client-cancelled | 502/503 infra | 504 request timeout | 500 app error"
+      description = "499 client-cancelled | 500 uncaught app error | 502 upstream marketplace fault | 503 infra | 504 request timeout (422 = credential rejection, never matched here)"
     }
     labels {
       key         = "path"
@@ -1423,7 +1432,10 @@ locals {
     ```
 
     499 = Convex gave up at 60s. 504 = Cloud Run request timeout. 503 =
-    container died.
+    container died. 502 = the marketplace returned something we could not
+    use (outage, block page, changed login flow). 500 = an uncaught throw in
+    our own code. 422 = the seller's credentials were refused — expected
+    traffic, not an incident, and no policy matches it.
 
     **3. PostHog** — events `credential_test_failed` / `credential_test_succeeded`
     from apps/web/convex/credentials.ts. Filter by `platform`. NOTE the naming
@@ -1480,10 +1492,15 @@ locals {
     be NO browser_login_call log line for this request; that absence is the
     diagnosis. Check whether the upstream marketplace is reachable at all.
 
-    500 is deliberately NOT part of this policy: an ordinary BSC credential
-    rejection returns 500 (SportLots returns 400 for the same case), so
-    including it would page on seller typos. Real application failures are
-    covered by the login-failures policy with a far better error taxonomy.
+    502 means we reached the marketplace but could not complete the login
+    exchange — an outage, a block page, or a changed login flow on their
+    side. Check the browser_login_call line's `error_class` and the PostHog
+    diagnostic to see what page was actually served.
+
+    500 means an uncaught throw in our own code, or a container that died
+    mid-request. Since NEO-98 a rejected password returns 422 and never
+    reaches this policy, so a 500 here is always ours — start with the
+    revision's stderr rather than assuming a seller mistyped something.
 
     ${local.neo43_runbook_common}
   EOT
@@ -1649,7 +1666,7 @@ resource "google_monitoring_alert_policy" "browser_login_hang" {
   combiner     = "OR"
 
   conditions {
-    display_name = "Any 499/502/503/504 on a /login/* request in 5m"
+    display_name = "Any 499 or 5xx on a /login/* request in 5m"
 
     condition_threshold {
       filter = join(" AND ", [
@@ -1657,10 +1674,12 @@ resource "google_monitoring_alert_policy" "browser_login_hang" {
         # the failures policy above.
         "metric.type=\"logging.googleapis.com/user/${google_logging_metric.browser_login_http_status[0].name}\"",
         "resource.type=\"cloud_run_revision\"",
-        # 500 EXCLUDED — see the note at the top of this section: an ordinary
-        # BSC credential rejection is a 500. None of 499/502/503/504 can be
-        # produced by user input.
-        "metric.label.status=monitoring.regex.full_match(\"499|502|503|504\")",
+        # 499 + ALL 5xx. NEO-98 moved credential rejections to 422, so no 5xx
+        # on this path can be produced by user input any more and 500 is safe
+        # to include — which is the whole point: it is the status a container
+        # crash or an uncaught throw actually returns, and excluding it left
+        # this policy with no crash coverage at all.
+        "metric.label.status=monitoring.regex.full_match(\"499|5[0-9][0-9]\")",
       ])
 
       comparison = "COMPARISON_GT"
