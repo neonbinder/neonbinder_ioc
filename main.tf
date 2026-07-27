@@ -1788,9 +1788,15 @@ resource "google_monitoring_alert_policy" "browser_login_canary_absent" {
       # that tightens the schedules.
       duration = var.login_canary_absence_duration
 
+      # ALIGN_DELTA, not ALIGN_COUNT: browser_login_duration_ms is
+      # DELTA/DISTRIBUTION, and the API rejects ALIGN_COUNT for that
+      # combination ("The aligner cannot be applied to metrics with kind
+      # DELTA and value type DISTRIBUTION"). Absence detection only needs the
+      # series to have data at all, so the canonical DELTA aligner is right —
+      # we are asking "did any canary login complete", not "how many".
       aggregations {
         alignment_period   = "600s"
-        per_series_aligner = "ALIGN_COUNT"
+        per_series_aligner = "ALIGN_DELTA"
       }
 
       trigger {
