@@ -19,3 +19,8 @@ common_labels = {
   environment = "production"
   managed_by  = "terraform"
 }
+# NEO-43 item 4: synthetic login canary — prod only. Lands PAUSED so the
+# credential secrets can be seeded before the first real marketplace login;
+# unpause in a follow-up once `gcloud secrets versions list` shows a value.
+enable_login_canary = true
+login_canary_paused = true
