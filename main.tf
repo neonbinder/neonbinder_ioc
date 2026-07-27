@@ -1559,8 +1559,18 @@ locals {
 #     incidents once data stops, which is what evaluation_missing_data would
 #     otherwise have handled.
 #
-#   notification_rate_limit = 3600s — caps a sustained outage at one email an
-#     hour per policy.
+#   NO notification_rate_limit — also FORCED. The API rejects it:
+#     "only log-based alert policies may specify a notification rate limit."
+#     "Log-based" there means a condition_matched_log policy; these are
+#     metric-threshold policies over log-BASED METRICS, which is a different
+#     thing. Another apply-time-only failure (see the note above).
+#
+#     Little is lost. A metric-threshold policy notifies on incident OPEN and
+#     on CLOSE — it does not re-notify on a loop while an incident stays open,
+#     which is what a rate limit would have guarded against. With
+#     auto_close=1800s the worst case during a sustained outage is roughly one
+#     open/close pair per 30 minutes, which is about what the 1h cap was
+#     approximating anyway.
 #
 # Deliberately NOT built: any ratio/rate condition. At single-digit daily
 # logins, "50% error rate" is one failed login and the ratio is undefined for
@@ -1620,10 +1630,6 @@ resource "google_monitoring_alert_policy" "browser_login_failures" {
 
   alert_strategy {
     auto_close = "1800s"
-
-    notification_rate_limit {
-      period = "3600s"
-    }
   }
 
   documentation {
@@ -1680,10 +1686,6 @@ resource "google_monitoring_alert_policy" "browser_login_hang" {
 
   alert_strategy {
     auto_close = "1800s"
-
-    notification_rate_limit {
-      period = "3600s"
-    }
   }
 
   documentation {
@@ -1740,10 +1742,6 @@ resource "google_monitoring_alert_policy" "browser_login_latency" {
 
   alert_strategy {
     auto_close = "1800s"
-
-    notification_rate_limit {
-      period = "3600s"
-    }
   }
 
   documentation {
@@ -1805,10 +1803,6 @@ resource "google_monitoring_alert_policy" "browser_login_canary_absent" {
 
   alert_strategy {
     auto_close = "1800s"
-
-    notification_rate_limit {
-      period = "3600s"
-    }
   }
 
   documentation {
