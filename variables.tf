@@ -184,6 +184,27 @@ variable "cross_env_tf_deployer_emails" {
   default     = []
 }
 
+# NEO-43: production alerting for browser-service marketplace login failures
+# and hangs. Today nothing notifies anyone when SportLots/BSC login breaks —
+# a seller reports it, or we notice while running E2E (which is literally how
+# the ~10-minute SportLots login hang that prompted this ticket was found).
+#
+# Prod only. Dev deliberately gets neither the alert policies nor the IAM:
+# dev's E2E suites exercise bad credentials on purpose, so dev would be a
+# permanent false-positive generator, and the whole point is a channel that
+# stays quiet until something is genuinely wrong.
+variable "enable_browser_login_alerts" {
+  description = "Whether to create the NEO-43 browser-service login alerting stack (notification channel, log-based metrics, alert policies) and the tf-deployer IAM it requires. True only in environments/prod.tfvars — dev intentionally has no login alerting because its E2E suites fail logins deliberately."
+  type        = bool
+  default     = false
+}
+
+variable "alert_notification_email" {
+  description = "Destination for NEO-43 browser-service login alerts. NeonBinder is a single-operator project, so this is the operator mailbox rather than a rotation. Note this address will receive alert bodies containing marketplace/platform names and error classes — no credentials or page content (see the redaction rules in services/browser/src/services/login-diagnostic.ts)."
+  type        = string
+  default     = "neonbinder@neonbinder.io"
+}
+
 variable "terraform_state_bucket" {
   description = "GCS bucket holding Terraform state. Lives in prod; dev's tf-deployer needs cross-project access."
   type        = string

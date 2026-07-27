@@ -552,6 +552,95 @@ resource "google_project_iam_member" "tf_deployer_serviceusage_admin" {
   member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
 }
 
+# ──────────────────────────────────────────────
+# Browser login alerting — IAM + APIs (NEO-43)
+# ──────────────────────────────────────────────
+#
+# These four grants and two API enablements ship in their OWN PR, ahead of the
+# alert policies / log metrics / scheduler jobs that need them. That split is
+# deliberate and is the direct lesson of NEO-95: the prod apply that created
+# google_bigquery_dataset.billing_export failed on a missing permission granted
+# in the SAME apply (see tf_deployer_bigquery_data_editor above), and needed a
+# follow-up commit. `depends_on` fixes graph ordering but NOT project-IAM
+# propagation delay, which is measured in minutes. Two applies is the only
+# reliable fix.
+#
+# All are count-gated on the same prod-only flag as the resources they enable,
+# so the dev tf-deployer's permissions are unchanged by this ticket.
+
+resource "google_project_iam_member" "tf_deployer_monitoring_alert_editor" {
+  count   = var.enable_browser_login_alerts ? 1 : 0
+  project = var.gcp_project_id
+  role    = "roles/monitoring.alertPolicyEditor"
+  member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+# Separate from alertPolicyEditor on purpose: that role cannot create
+# notification channels, and roles/monitoring.editor (which covers both) also
+# grants uptime checks, metric descriptors, groups, services and dashboards —
+# strictly more than this ticket needs.
+resource "google_project_iam_member" "tf_deployer_monitoring_channel_editor" {
+  count   = var.enable_browser_login_alerts ? 1 : 0
+  project = var.gcp_project_id
+  role    = "roles/monitoring.notificationChannelEditor"
+  member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+# SECURITY NOTE — this is the widest grant in this ticket; disclosing it here
+# per .claude/agent-memory/security-auditor/terraform_iam_findings.md.
+#
+# roles/logging.configWriter is the ONLY predefined role that contains
+# logging.logMetrics.create/update/delete. There is no logMetricEditor role.
+# It also permits creating/modifying log SINKS, EXCLUSIONS, BUCKETS and VIEWS,
+# which is both exfiltration-relevant (a sink can route logs to an
+# attacker-controlled destination) and availability-relevant (an exclusion can
+# silently blackhole the very logs these alerts read).
+#
+# A custom role scoped to logMetrics.* would be genuinely narrower, but
+# creating one requires granting the tf-deployer roles/iam.roleAdmin
+# (iam.roles.create) — a LARGER escalation that also reintroduces the same
+# bootstrap-ordering problem one layer up. Rejected on net risk.
+#
+# Mitigations: (a) this SA is only assumable via Workload Identity Federation
+# from this repo on the configured branch ref (see the WIF block below);
+# (b) google_project_iam_audit_config.iam_audit records admin activity;
+# (c) count-gated, so dev never receives it.
+resource "google_project_iam_member" "tf_deployer_logging_config_writer" {
+  count   = var.enable_browser_login_alerts ? 1 : 0
+  project = var.gcp_project_id
+  role    = "roles/logging.configWriter"
+  member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+# For the NEO-43 synthetic login canary (Cloud Scheduler jobs). `admin` rather
+# than `editor` is the narrowest role that can create/update/delete jobs.
+resource "google_project_iam_member" "tf_deployer_cloudscheduler_admin" {
+  count   = var.enable_browser_login_alerts ? 1 : 0
+  project = var.gcp_project_id
+  role    = "roles/cloudscheduler.admin"
+  member  = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+# Monitoring is on by default for most GCP projects, but nothing in this repo
+# guaranteed it — and an alert policy apply against a disabled API fails in a
+# way that reads like a permissions problem. Declare it explicitly.
+#
+# logging.googleapis.com is deliberately NOT declared: it is always-on and
+# cannot be disabled, so a google_project_service for it is pure noise.
+resource "google_project_service" "monitoring_api" {
+  count              = var.enable_browser_login_alerts ? 1 : 0
+  project            = var.gcp_project_id
+  service            = "monitoring.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "cloudscheduler_api" {
+  count              = var.enable_browser_login_alerts ? 1 : 0
+  project            = var.gcp_project_id
+  service            = "cloudscheduler.googleapis.com"
+  disable_on_destroy = false
+}
+
 # Cross-project state bucket access: dev CI uses the prod-hosted state bucket.
 # This runs only in the env whose project owns the bucket (prod) and grants
 # other envs' tf-deployer SAs read/write on it.
