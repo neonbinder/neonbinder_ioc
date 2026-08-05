@@ -112,6 +112,79 @@ resource "google_project_iam_member" "deployer_storage_object_admin" {
   member  = "serviceAccount:${google_service_account.deployer.email}"
 }
 
+# NEO-115: the scheduled Secret Manager version GC workflow authenticates via
+# WIF as this deployer SA (GCP_SERVICE_ACCOUNT_DEPLOYER{,_DEV} in the monorepo)
+# and sweeps superseded credential secret versions in both dev and prod. It
+# needs exactly three permissions, split across two roles:
+#
+#   secretmanager.secrets.list    ┐ enumerate the per-user credential secrets
+#   secretmanager.versions.list   ┘ and their versions          → viewer
+#   secretmanager.versions.destroy  reclaim superseded versions → secretVersionManager
+#
+# SECURITY — these secrets hold real users' marketplace usernames and passwords.
+# The GC job must be able to COUNT and DESTROY versions but never READ a
+# payload. Neither role below contains `secretmanager.versions.access`, the
+# permission that returns secret material; verified against the live role
+# definitions (`gcloud iam roles describe`) rather than assumed:
+#
+#   roles/secretmanager.viewer               → secrets.{get,getIamPolicy,list,
+#     listEffectiveTags,listTagBindings}, versions.{get,list}, locations.{get,
+#     list}, resourcemanager.projects.{get,list}.  versions.get is METADATA
+#     only (name/state/createTime) — the payload comes from versions.access,
+#     which is absent.
+#   roles/secretmanager.secretVersionManager → versions.{add,destroy,disable,
+#     enable,get,list}, secrets.rotate, resourcemanager.projects.{get,list}.
+#
+# roles/secretmanager.admin was REJECTED: it is what the browser RUNTIME SA
+# holds (see runtime_secret_admin above) precisely because that service must
+# read payloads, and it additionally grants secrets.create/delete plus
+# setIamPolicy. Handing payload-read to a scheduled CI job — one triggerable by
+# anyone who can dispatch a workflow — would turn a cost-cleanup task into a
+# credential-exfiltration path. The two narrow roles are the least privilege
+# that still lets the sweep function.
+#
+# DISCLOSURE — secretVersionManager is wider than the sweep strictly needs. It
+# is the narrowest PREDEFINED role containing versions.destroy, but it also
+# carries versions.add/disable/enable and secrets.rotate. So the GC job could
+# write a NEW version over a credential secret or disable an in-use one
+# (integrity/availability), even though it still cannot read one
+# (confidentiality — the property that actually matters for user passwords).
+# A custom role scoped to secrets.list + versions.list + versions.destroy would
+# be exactly minimal, but creating one requires granting the tf-deployer
+# roles/iam.roleAdmin (iam.roles.create) — the same larger-escalation trade
+# already rejected for logging.configWriter further down this file. Same call
+# here, for the same reason.
+#
+# Also note this SA is NOT starting from zero on Secret Manager: it already
+# holds roles/secretmanager.secretAccessor on the single `internal-api-key`
+# secret (see deployer_api_key_access below) for post-deploy smoke tests. That
+# binding is SECRET-scoped, so it confers nothing on the per-user credential
+# secrets, and the project-level roles added here contain no accessor — the two
+# do not compose into payload read on user credentials.
+#
+# Ungated (no count), unlike the NEO-43 tf_deployer_* monitoring grants: the GC
+# workflow's matrix sweeps dev AND prod, so both projects' deployer SAs need
+# these. Matches the other deployer_* grants above, which are also unconditional.
+#
+# ORDERING (NEO-95 lesson, see the long note above tf_deployer_monitoring_alert_editor):
+# project-level IAM propagation takes minutes and `depends_on` does not fix it,
+# so a grant and its first consumer must not ship in the same apply. That holds
+# here: this grant lands via terraform (develop → dev, main → prod) strictly
+# ahead of the GC workflow's first scheduled run in the monorepo — a separate
+# repo, a separate pipeline, and the workflow is not merged yet. No new
+# resource in THIS apply depends on these bindings.
+resource "google_project_iam_member" "deployer_secret_viewer" {
+  project = var.gcp_project_id
+  role    = "roles/secretmanager.viewer"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_project_iam_member" "deployer_secret_version_manager" {
+  project = var.gcp_project_id
+  role    = "roles/secretmanager.secretVersionManager"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
 # Deployer can act as the runtime SA (scoped to SA-level, not project-level)
 resource "google_service_account_iam_member" "deployer_act_as_runtime" {
   service_account_id = google_service_account.runtime.name
