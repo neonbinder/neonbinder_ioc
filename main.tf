@@ -129,15 +129,70 @@ resource "google_service_account_iam_member" "deployer_act_as_runtime" {
 #
 # NEO-95: dev's repo hit 107GB and was growing forever — every CI push (browser
 # + preprocess services) adds a new commit-sha-tagged image that was never
-# cleaned up. cleanup_policies below cap growth in both envs:
-#   - "delete-old-untagged": untagged images (superseded manifests, failed
-#     pushes) older than 14 days are deleted.
-#   - "keep-recent-tagged": the most recent 15 tagged versions are always
-#     retained, regardless of age — protects rollback candidates and any live
-#     `pr-<N>` preview tags.
-# Anything not matched by either policy (i.e. a tagged image older than the 15
-# most recent) is left alone; there's no "delete old tagged" rule, since tags
-# are the only durable pointer to a deployable image.
+# cleaned up. NEO-95 added two cleanup policies to cap that.
+#
+# NEO-117: only ONE of those two ever did anything, and the repo kept growing
+# to 117.8 GB (dev) / 41.7 GB (prod) — ~$15/month.
+#
+#   - "delete-old-untagged" WORKS. Verified: zero untagged images older than
+#     14 days in either project. Left exactly as-is; do not touch it.
+#
+#   - "keep-recent-tagged" was a NO-OP. In Artifact Registry a KEEP policy only
+#     protects versions *from a DELETE policy* — it never deletes anything on
+#     its own. With no DELETE matching tagged images, nothing tagged was ever
+#     collected. Proof rather than doc-reading: dev `neonbinder-browser` held
+#     112 tagged versions, the oldest 109 days, when `keep_count` was 15. If
+#     KEEP meant "delete beyond 15" there would have been 15.
+#
+# So the KEEP is now paired with DELETE policies that give it something to
+# protect against, and split per-package because the two images have opposite
+# characteristics.
+#
+# WHY keep_count = 10 FOR BROWSER
+#
+# The floor is not "how many rollbacks do we want" — it is "how many images are
+# referenced by a revision that still exists". Delete an image a retained
+# revision points at and that revision cannot start at all; it is not merely
+# un-rollback-to-able. That hazard is already real: prod revision
+# `neonbinder-browser-00001-47f` references sha256:445410f3… which is ALREADY
+# absent from the registry (pre-existing, not caused by this change).
+#
+# Measured 2026-08-06 by ranking every AR version newest-first and locating
+# every digest referenced by a live Cloud Run revision:
+#
+#   dev  browser: 112 versions,  8 pinned, deepest live-pinned rank =  7
+#   prod browser:  40 versions,  5 pinned, deepest live-pinned rank =  4
+#
+# Product direction is "we only need to roll back one version", and
+# `revision-gc.yml` is being set to --keep 2 to match. It is tempting to set
+# keep_count to 2 as well. That would be wrong, and the reason is worth stating
+# because it is not obvious:
+#
+# keep_count ranks by PUSH VOLUME, not by revision count, and PR previews push
+# to this same package. Revision count and image rank are different axes. A
+# keep_count of 2 survives only until the next busy PR day (13 dev pushes in one
+# day, measured), at which point the live serving image is outside the window
+# and gets collected.
+#
+# 10 is set by PROD, not dev: prod pushes ~0.4/day, so 10 builds deep is ~25
+# days of protection there — deliberately more than the 14-day age gate below,
+# so a slow-moving prod image is never left unprotected by both guards at once.
+# It also stays above today's deepest live-pinned rank of 7 in dev.
+#
+# WHY preprocess IS PROTECTIVE ONLY (keep 30, no DELETE targets it)
+#
+# All 24 dev preprocess versions are pinned by live revisions (deepest rank 24
+# of 24). There is nothing to reclaim, and any lower keep_count would orphan
+# running revisions for zero benefit. `neonbinder_preprocess` accumulates
+# revisions because its own preview-cleanup removes the traffic tag but never
+# the revision — the NEO-114 bug, in a different repo. Unpinning that storage
+# needs a revision sweep there FIRST; only then is lowering this keep_count
+# safe. keep_count = 30 covers all 24 with headroom until that lands.
+#
+# Repo cap is 10 cleanup policies; this uses 5.
+#
+# DO NOT set cleanup_policy_dry_run = true to "preview" this. That flag is
+# repo-wide and would silently disable the working untagged policy too.
 resource "google_artifact_registry_repository" "gcr_io" {
   provider               = google-beta
   project                = var.gcp_project_id
@@ -157,12 +212,86 @@ resource "google_artifact_registry_repository" "gcr_io" {
     }
   }
 
+  # Protects the 10 newest browser builds from delete-tagged-browser below.
+  # Package-scoped so the count is unambiguously per-image rather than
+  # repo-wide — the old unscoped policy left that in doubt.
   cleanup_policies {
-    id     = "keep-recent-tagged"
+    id     = "keep-recent-browser"
     action = "KEEP"
 
     most_recent_versions {
-      keep_count = 15
+      package_name_prefixes = ["neonbinder-browser"]
+      keep_count            = 10
+    }
+  }
+
+  # Purely protective: no DELETE policy targets preprocess by package, so this
+  # only guards against delete-stale-pr-images catching a pr-tagged preprocess
+  # image that a live revision still needs.
+  cleanup_policies {
+    id     = "keep-recent-preprocess"
+    action = "KEEP"
+
+    most_recent_versions {
+      package_name_prefixes = ["neonbinder-preprocess"]
+      keep_count            = 30
+    }
+  }
+
+  # The actual reclaim. Unbounded by age on purpose — keep-recent-browser above
+  # is the guard, so retention is expressed as "the last 10 builds" rather than
+  # as a date. An age gate would leave unpinned 30-90 day old main-branch builds
+  # accumulating indefinitely, which is most of what filled the repo.
+  # TWO independent guards, because rank alone is not safe here.
+  #
+  # An image is collected only if it is BOTH older than 14 days AND outside the
+  # newest 10 (keep-recent-browser above). Either condition on its own protects
+  # it. That redundancy is load-bearing, not belt-and-braces:
+  #
+  # PR previews push to THIS SAME package (`neonbinder-browser:pr-<N>`), so
+  # version rank is driven by total push volume, not by deploy count. Measured
+  # 2026-08-06: dev averages 1.8 pushes/day but spiked to 13 IN ONE DAY. With a
+  # rank-only guard, one busy PR day pushes the live serving image past the keep
+  # window and deletes it — and since every revision is minScale=0, the next
+  # request cold-starts against a missing image and every request fails. The age
+  # gate makes that impossible: nothing under 14 days old is ever collected,
+  # whatever the preview churn does to its rank.
+  #
+  # Conversely the rank guard is what protects PROD, whose risk is the opposite
+  # shape: prod pushes only ~0.4/day, so an image 10 builds deep is ~25 days old
+  # and the age gate alone would have collected it. Prod's LOW deploy frequency
+  # is what forces keep_count as high as 10.
+  cleanup_policies {
+    id     = "delete-tagged-browser"
+    action = "DELETE"
+
+    condition {
+      tag_state             = "TAGGED"
+      package_name_prefixes = ["neonbinder-browser"]
+      older_than            = "1209600s" # 14 days
+    }
+  }
+
+  # Per-PR preview images. `preview-cleanup.yml` in the monorepo tries to delete
+  # these from CI and has silently 403'd since it was written — the deployer SAs
+  # hold artifactregistry.writer + createOnPushWriter, neither of which contains
+  # versions.delete, and the step ends in `|| echo "... — ignoring"` so it exits
+  # 0. Dev accumulated 43 pr-* tagged images against 1 open PR.
+  #
+  # Fixed here rather than by granting the CI SA repoAdmin: a server-side
+  # retention policy is least-privilege, whereas blanket registry delete from CI
+  # is a supply-chain risk for no benefit.
+  #
+  # 30 days rather than unbounded because a long-lived PR branch can legitimately
+  # keep redeploying the same preview.
+  cleanup_policies {
+    id     = "delete-stale-pr-images"
+    action = "DELETE"
+
+    condition {
+      tag_state    = "TAGGED"
+      tag_prefixes = ["pr-"]
+      older_than   = "2592000s" # 30 days
     }
   }
 }
