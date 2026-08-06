@@ -136,6 +136,12 @@ variable "browser_wif_branch_ref" {
   default     = "refs/heads/main"
 }
 
+variable "secret_gc_workflow_ref" {
+  description = "GitHub `job_workflow_ref` claim allowed to impersonate the neonbinder-secret-gc SA (NEO-115). Format is `owner/repo/.github/workflows/<file>@<ref>`. The ref is the branch the workflow FILE is loaded from — the default branch for both `schedule` and `workflow_dispatch` — not the branch a deploy is allowed from."
+  type        = string
+  default     = "neonbinder/neonbinder/.github/workflows/secret-version-gc.yml@refs/heads/main"
+}
+
 variable "browser_wif_allow_pull_requests" {
   description = "If true, the neonbinder_browser WIF provider also accepts pull_request OIDC tokens (in addition to push to wif_branch_ref). Enable in dev so per-PR preview deployments can authenticate; keep disabled in prod. Workflow-level guards must still restrict PR previews to same-repo branches."
   type        = bool

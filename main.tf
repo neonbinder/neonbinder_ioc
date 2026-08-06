@@ -442,6 +442,13 @@ resource "google_iam_workload_identity_pool_provider" "github" {
     "attribute.repository" = "assertion.repository"
     "attribute.ref"        = "assertion.ref"
     "attribute.event_name" = "assertion.event_name"
+    # NEO-115: `job_workflow_ref` is the workflow FILE that minted the token
+    # (e.g. "neonbinder/neonbinder/.github/workflows/secret-version-gc.yml@refs/heads/main"),
+    # which `repository` and `ref` cannot express — they identify the repo and
+    # the branch, not which of its workflows is running. Mapping it here is
+    # inert for every existing binding; only the secret-gc SA binds on it. See
+    # google_service_account_iam_member.secret_gc_wif for why that matters.
+    "attribute.job_workflow_ref" = "assertion.job_workflow_ref"
   }
 
   # Browser repo is trunk-based: `browser_wif_branch_ref` is
@@ -469,6 +476,120 @@ resource "google_service_account_iam_member" "github_actions_wif_monorepo" {
   service_account_id = google_service_account.deployer.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_actions.name}/attribute.repository/${var.github_repo_monorepo}"
+}
+
+# ──────────────────────────────────────────────
+# Secret Version GC SA (NEO-115)
+# ──────────────────────────────────────────────
+#
+# The weekly Secret Manager version sweep
+# (.github/workflows/secret-version-gc.yml in the monorepo) reclaims superseded
+# credential secret versions. `neonbinder-dev` had accumulated 1,326 ENABLED
+# versions across 33 secrets (~$70/month, +~25/day) because nothing had ever
+# pruned them.
+#
+# WHY A DEDICATED SA rather than reusing neonbinder-browser-deployer, which the
+# monorepo's other workflows already impersonate:
+#
+# The sweep needs `secretmanager.versions.destroy` project-wide — secret names
+# are `${site}-credentials-${userId}`, not knowable at plan time, so the grant
+# cannot be scoped to individual secrets (same constraint documented above
+# runtime_secret_admin). Hanging that off the deployer SA would mean every
+# identity that can reach the deployer SA can also destroy or overwrite every
+# secret version in the project. In dev that set is wide: the deployer's
+# workloadIdentityUser binding above is scoped to
+# `attribute.repository/<monorepo>`, and dev's provider condition accepts
+# `event_name == "pull_request"` (that is how per-PR Cloud Run previews
+# authenticate). So ANY pull request in the monorepo can mint a deployer token.
+# A destroy is irreversible and these are real users' marketplace credentials.
+#
+# This SA instead binds workloadIdentityUser on `attribute.job_workflow_ref`,
+# which pins impersonation to one workflow FILE on one ref. A PR preview, a
+# compromised unrelated workflow, or a hand-run `gh workflow run` on another
+# workflow all fail to mint this token. Conversely this SA holds nothing else —
+# no Cloud Run deploy, no actAs on the runtime SA, no GCS — so a fault in the
+# sweep cannot reach anything but secret version metadata.
+#
+# ROLES — exactly three permissions, split across two predefined roles:
+#
+#   secretmanager.secrets.list    ┐ enumerate the credential secrets and
+#   secretmanager.versions.list   ┘ their versions              → viewer
+#   secretmanager.versions.destroy  reclaim superseded versions → secretVersionManager
+#
+# NEITHER role contains `secretmanager.versions.access`, the permission that
+# returns secret material, so this identity can count and destroy versions but
+# never read a payload:
+#
+#   roles/secretmanager.viewer               → secrets.{get,getIamPolicy,list,
+#     listEffectiveTags,listTagBindings}, versions.{get,list}, locations.{get,
+#     list}, resourcemanager.projects.{get,list}. versions.get is METADATA only
+#     (name/state/createTime); the payload comes from versions.access.
+#   roles/secretmanager.secretVersionManager → versions.{add,destroy,disable,
+#     enable,get,list}, secrets.rotate, resourcemanager.projects.{get,list}.
+#
+# roles/secretmanager.admin was REJECTED — it is what the browser RUNTIME SA
+# holds (runtime_secret_admin above) precisely because that service must read
+# payloads, and it additionally grants secrets.create/delete plus setIamPolicy.
+#
+# DISCLOSURE — secretVersionManager is still wider than the sweep needs: it is
+# the narrowest PREDEFINED role containing versions.destroy, but it also carries
+# versions.add/disable/enable and secrets.rotate. So this identity could write a
+# new version over a secret or disable an in-use one (integrity/availability),
+# though it still cannot read one (confidentiality). A custom role limited to
+# secrets.list + versions.list + versions.destroy would be exactly minimal, but
+# creating one requires granting the tf-deployer roles/iam.roleAdmin
+# (iam.roles.create) — the same larger-escalation trade already rejected for
+# logging.configWriter further down this file. Same call here, for the same
+# reason. Pinning WHO can assume the SA is the mitigation that does not require
+# that escalation.
+#
+# ORDERING (NEO-95 lesson, see the note above tf_deployer_monitoring_alert_editor):
+# project-level IAM propagation takes minutes and `depends_on` does not fix it,
+# so a grant and its first consumer must not ship in the same apply. That holds:
+# these bindings land via terraform (develop → dev, main → prod) strictly ahead
+# of the GC workflow's first run in the monorepo — separate repo, separate
+# pipeline, and no resource in THIS apply depends on them.
+resource "google_service_account" "secret_gc" {
+  account_id   = "neonbinder-secret-gc"
+  display_name = "NeonBinder Secret Version GC"
+  description  = "Scheduled Secret Manager version sweep (NEO-115). Destroy-only: holds no accessor, cannot read secret payloads."
+}
+
+resource "google_project_iam_member" "secret_gc_viewer" {
+  project = var.gcp_project_id
+  role    = "roles/secretmanager.viewer"
+  member  = "serviceAccount:${google_service_account.secret_gc.email}"
+}
+
+resource "google_project_iam_member" "secret_gc_version_manager" {
+  project = var.gcp_project_id
+  role    = "roles/secretmanager.secretVersionManager"
+  member  = "serviceAccount:${google_service_account.secret_gc.email}"
+}
+
+# The narrowing that makes the project-level destroy grant above acceptable.
+#
+# `attribute.job_workflow_ref` is GitHub's `job_workflow_ref` OIDC claim: the
+# workflow file plus the ref it was loaded from. Binding on it means only
+# secret-version-gc.yml, running from `secret_gc_workflow_ref`, can impersonate
+# this SA — not the repo at large, and not a pull_request token.
+#
+# Note the ref in `secret_gc_workflow_ref` is the branch the workflow FILE is
+# loaded from, which for both `schedule` and `workflow_dispatch` is the default
+# branch (refs/heads/main) in both environments — including dev, whose Cloud Run
+# previews run from PR refs but whose GC sweep does not. It is deliberately NOT
+# `browser_wif_branch_ref`: that variable happens to be refs/heads/main too, but
+# it means "the branch browser deploys are allowed from", a different fact that
+# could diverge later.
+#
+# This binding also has to satisfy the provider's own attribute_condition, which
+# it does in both envs: a scheduled or dispatched run on the default branch
+# carries assertion.ref == "refs/heads/main", matching prod's push-to-main-only
+# condition without relying on dev's looser pull_request clause.
+resource "google_service_account_iam_member" "secret_gc_wif" {
+  service_account_id = google_service_account.secret_gc.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_actions.name}/attribute.job_workflow_ref/${var.secret_gc_workflow_ref}"
 }
 
 # ──────────────────────────────────────────────
@@ -2103,6 +2224,11 @@ output "prizes_bucket_url" {
 output "wif_provider_name" {
   description = "Full resource name of the WIF provider (use as GCP_WIF_PROVIDER GitHub secret)"
   value       = google_iam_workload_identity_pool_provider.github.name
+}
+
+output "secret_gc_service_account_email" {
+  description = "Email of the Secret Manager version GC service account (NEO-115). Hardcoded in the monorepo's secret-version-gc.yml matrix rather than stored as a GitHub secret — an SA email is not sensitive, and the workflow already carries the project IDs in plaintext."
+  value       = google_service_account.secret_gc.email
 }
 
 output "terraform_deployer_service_account_email" {
