@@ -183,11 +183,13 @@ resource "google_service_account_iam_member" "deployer_act_as_runtime" {
 #
 # All 24 dev preprocess versions are pinned by live revisions (deepest rank 24
 # of 24). There is nothing to reclaim, and any lower keep_count would orphan
-# running revisions for zero benefit. `neonbinder_preprocess` accumulates
-# revisions because its own preview-cleanup removes the traffic tag but never
-# the revision — the NEO-114 bug, in a different repo. Unpinning that storage
-# needs a revision sweep there FIRST; only then is lowering this keep_count
-# safe. keep_count = 30 covers all 24 with headroom until that lands.
+# running revisions for zero benefit. Preprocess accumulates revisions because
+# its preview-cleanup removes the traffic tag but never the revision — the
+# NEO-114 bug. Since NEO-123 that pipeline lives in the monorepo at
+# .github/workflows/preprocess.yml, so the fix is now reachable from the same
+# place as the browser one. Unpinning that storage needs a revision sweep
+# FIRST; only then is lowering this keep_count safe. keep_count = 30 covers
+# all 24 with headroom until that lands.
 #
 # Repo cap is 10 cleanup policies; this uses 5.
 #
@@ -1190,7 +1192,10 @@ resource "google_cloud_run_service_iam_member" "preprocess_public_access" {
   member   = "allUsers"
 }
 
-# WIF provider dedicated to the preprocess repo
+# WIF provider dedicated to the preprocess deploy lane. Since NEO-123 that lane
+# lives in the monorepo, so this provider and `github` above trust the SAME repo.
+# They stay two separate providers deliberately, so either lane can be scoped or
+# revoked without touching the other.
 resource "google_iam_workload_identity_pool_provider" "github_preprocess" {
   workload_identity_pool_id          = google_iam_workload_identity_pool.github_actions.workload_identity_pool_id
   workload_identity_pool_provider_id = "github-preprocess"
@@ -1217,7 +1222,11 @@ resource "google_iam_workload_identity_pool_provider" "github_preprocess" {
   }
 }
 
-# Allow GitHub Actions (preprocess repo) to impersonate the preprocess deployer SA
+# Allow GitHub Actions (monorepo, preprocess lane) to impersonate the preprocess
+# deployer SA. NOTE: this principalSet is repo-scoped, not workflow-scoped, so
+# post-NEO-123 any monorepo workflow can assume this SA. That matches the
+# browser deployer's existing posture; narrowing both via job_workflow_ref (as
+# secret_gc_wif does) is tracked separately.
 resource "google_service_account_iam_member" "github_actions_wif_preprocess" {
   service_account_id = google_service_account.preprocess_deployer.name
   role               = "roles/iam.workloadIdentityUser"
@@ -1242,8 +1251,9 @@ resource "google_service_account_iam_member" "tf_deployer_act_as_preprocess_depl
 # ──────────────────────────────────────────────
 # Home for the real-card integration-test fixtures that are too large to
 # commit to git (phone-camera shots at 22-26 MB each). Only the YAML
-# expectation sidecars live in the preprocess repo; images live here and
-# are fetched on demand via `scripts/fetch_fixtures.py`. No prod mirror:
+# expectation sidecars live in the monorepo at services/preprocess/; images
+# live here and are fetched on demand via
+# `services/preprocess/scripts/fetch_fixtures.py`. No prod mirror:
 # these are test data that dev services consume during integration runs.
 
 resource "google_storage_bucket" "preprocess_fixtures" {
