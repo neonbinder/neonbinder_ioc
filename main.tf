@@ -179,19 +179,30 @@ resource "google_service_account_iam_member" "deployer_act_as_runtime" {
 # so a slow-moving prod image is never left unprotected by both guards at once.
 # It also stays above today's deepest live-pinned rank of 7 in dev.
 #
-# WHY preprocess IS PROTECTIVE ONLY (keep 30, no DELETE targets it)
+# PREPROCESS — the sweep this block used to wait on has now happened (NEO-123).
 #
-# All 24 dev preprocess versions are pinned by live revisions (deepest rank 24
-# of 24). There is nothing to reclaim, and any lower keep_count would orphan
-# running revisions for zero benefit. Preprocess accumulates revisions because
-# its preview-cleanup removes the traffic tag but never the revision — the
-# NEO-114 bug. Since NEO-123 that pipeline lives in the monorepo at
-# .github/workflows/preprocess.yml, so the fix is now reachable from the same
-# place as the browser one. Unpinning that storage needs a revision sweep
-# FIRST; only then is lowering this keep_count safe. keep_count = 30 covers
-# all 24 with headroom until that lands.
+# The previous note here said preprocess was protective-only at keep 30 because
+# all 24 dev versions were pinned by live revisions, and that "unpinning that
+# storage needs a revision sweep FIRST; only then is lowering this keep_count
+# safe." Both halves of that are now resolved:
 #
-# Repo cap is 10 cleanup policies; this uses 5.
+#   * The cause is fixed at source. Preprocess accumulated pinned revisions
+#     because its promote deliberately RETAINED the sha-<short> tag, keeping
+#     each revision addressable forever (the NEO-114 shape). Since NEO-123 the
+#     pipeline lives at .github/workflows/preprocess.yml in the monorepo and
+#     promotes with a single atomic
+#     `update-traffic --to-revisions=X=100 --remove-tags=sha-<short>`.
+#     Verified on the first push-lane run: sha-88a3ebd exists in neither env.
+#
+#   * The backlog is gone. The sweep removed 42 revisions, 37 images and 9
+#     traffic tags; dev and prod each now hold exactly 1 revision and 1 image.
+#
+# So keep 30 no longer protects anything — it just defers collection. Dropped to
+# 10 to match browser, and a DELETE policy now targets preprocess for the first
+# time. Preprocess is the LOWER-frequency pusher of the two, so 10 builds deep
+# is far more calendar protection here than the ~25 days it buys browser.
+#
+# Repo cap is 10 cleanup policies; this uses 6.
 #
 # DO NOT set cleanup_policy_dry_run = true to "preview" this. That flag is
 # repo-wide and would silently disable the working untagged policy too.
@@ -236,7 +247,7 @@ resource "google_artifact_registry_repository" "gcr_io" {
 
     most_recent_versions {
       package_name_prefixes = ["neonbinder-preprocess"]
-      keep_count            = 30
+      keep_count            = 10
     }
   }
 
@@ -270,6 +281,26 @@ resource "google_artifact_registry_repository" "gcr_io" {
     condition {
       tag_state             = "TAGGED"
       package_name_prefixes = ["neonbinder-browser"]
+      older_than            = "1209600s" # 14 days
+    }
+  }
+
+  # Same treatment for preprocess, which until NEO-123 had no DELETE policy
+  # targeting it at all. Every push to main tags an image `:<full-sha>` (plus
+  # moves `:latest`), and nothing ever removed those — they were simply held
+  # below the keep-30 waterline. `keep-recent-preprocess` above still protects
+  # the newest 10 regardless of age; this only reaches what has fallen past it.
+  #
+  # 14 days matches browser. Preprocess images are much larger (torch + ~375MB
+  # of baked SAM weights), so each collected version reclaims proportionally
+  # more than a browser one.
+  cleanup_policies {
+    id     = "delete-tagged-preprocess"
+    action = "DELETE"
+
+    condition {
+      tag_state             = "TAGGED"
+      package_name_prefixes = ["neonbinder-preprocess"]
       older_than            = "1209600s" # 14 days
     }
   }
