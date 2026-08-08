@@ -81,10 +81,21 @@ variable "github_repo_terraform" {
   default     = "neonbinder/neonbinder_ioc"
 }
 
+# NEO-123 cutover: the preprocess service moves into the monorepo as
+# services/preprocess, and neonbinder_preprocess is archived once the monorepo
+# deploy is proven green. This value is repo-scoped and feeds BOTH
+# the provider attribute_condition (token minting) and the deployer SA's
+# principalSet binding (impersonation) — they must always agree, which is why
+# they read one variable rather than two literals.
+#
+# Kept as a distinct variable from github_repo_monorepo even though both now
+# hold "neonbinder/neonbinder": the github-preprocess provider stays separate
+# from the github provider so the two deploy lanes can be trusted, scoped, or
+# revoked independently.
 variable "github_repo_preprocess" {
   description = "GitHub repository (owner/repo) for the preprocess service CI/CD via WIF"
   type        = string
-  default     = "neonbinder/neonbinder_preprocess"
+  default     = "neonbinder/neonbinder"
 }
 
 # Preprocess Cloud Run configuration
@@ -125,7 +136,7 @@ variable "preprocess_max_instances" {
 }
 
 variable "wif_branch_ref" {
-  description = "Git branch ref allowed for WIF authentication on the terraform + preprocess providers (e.g. refs/heads/main). Set per-env: refs/heads/develop in dev, refs/heads/main in prod. The browser provider uses its own `browser_wif_branch_ref` because the browser repo is trunk-based — main is the only deploy ref regardless of env."
+  description = "Git branch ref allowed for WIF authentication on the TERRAFORM provider only (e.g. refs/heads/main). Set per-env: refs/heads/develop in dev, refs/heads/main in prod, because this repo is GitFlow. The browser and preprocess providers each use their own `*_wif_branch_ref` because both deploy from the trunk-based monorepo — main is the only deploy ref regardless of env."
   type        = string
   default     = "refs/heads/main"
 }
@@ -149,7 +160,7 @@ variable "browser_wif_allow_pull_requests" {
 }
 
 variable "preprocess_wif_branch_ref" {
-  description = "Git branch ref allowed for WIF authentication on the preprocess WIF provider. Always `refs/heads/main` in both envs because the preprocess repo is trunk-based (like the browser repo): a single push-to-main workflow auths to dev WIF (build+push to dev GCR + deploy-dev) and then prod WIF (retag/push + blue/green deploy-prod)."
+  description = "Git branch ref allowed for WIF authentication on the preprocess WIF provider. Always `refs/heads/main` in both envs because preprocess now deploys from the trunk-based monorepo (NEO-123), same as browser: a single push-to-main workflow auths to dev WIF (build+push to dev GCR + deploy-dev) and then prod WIF (retag/push + blue/green deploy-prod)."
   type        = string
   default     = "refs/heads/main"
 }
@@ -168,7 +179,7 @@ variable "create_prizes_bucket" {
 }
 
 variable "create_preprocess_fixtures_bucket" {
-  description = "Whether to create the preprocess test-fixture GCS bucket (dev only). Test images for `neonbinder_preprocess` integration tests live here — too large to commit to git. Not needed in prod."
+  description = "Whether to create the preprocess test-fixture GCS bucket (dev only). Test images for the `services/preprocess` integration tests live here — too large to commit to git. Not needed in prod."
   type        = bool
   default     = false
 }
