@@ -164,20 +164,31 @@ resource "google_service_account_iam_member" "deployer_act_as_runtime" {
 #   prod browser:  40 versions,  5 pinned, deepest live-pinned rank =  4
 #
 # Product direction is "we only need to roll back one version", and
-# `revision-gc.yml` is being set to --keep 2 to match. It is tempting to set
-# keep_count to 2 as well. That would be wrong, and the reason is worth stating
-# because it is not obvious:
+# `revision-gc.yml` is set to --keep 2 to match. It is tempting to set
+# keep_count to 2 as well. That is still wrong, but SINCE NEO-130 the reason has
+# changed — the original one no longer applies and should not be repeated:
 #
-# keep_count ranks by PUSH VOLUME, not by revision count, and PR previews push
-# to this same package. Revision count and image rank are different axes. A
-# keep_count of 2 survives only until the next busy PR day (13 dev pushes in one
-# day, measured), at which point the live serving image is outside the window
-# and gets collected.
+#   * WAS (pre-NEO-130): keep_count ranked by PUSH VOLUME and PR previews pushed
+#     into this same package, so a keep_count of 2 survived only until the next
+#     busy PR day (13 dev pushes in one day, measured) — at which point the live
+#     serving image fell outside the window and was collected. Previews now push
+#     to `<service>-preview`, so that confound is gone: one merge produces one
+#     version here (`:<sha>` is new, moving `:latest` only retags), and rank now
+#     genuinely means "deploys deep".
 #
-# 10 is set by PROD, not dev: prod pushes ~0.4/day, so 10 builds deep is ~25
-# days of protection there — deliberately more than the 14-day age gate below,
-# so a slow-moving prod image is never left unprotected by both guards at once.
-# It also stays above today's deepest live-pinned rank of 7 in dev.
+#   * STILL TRUE: images and revisions remain different axes. `revision-gc`'s
+#     keep 2 counts REVISIONS; this counts IMAGE VERSIONS, and a retained
+#     revision whose image was collected cannot start at all — it is not merely
+#     un-rollback-to-able. That hazard is real, not theoretical: prod revision
+#     `neonbinder-browser-00001-47f` references sha256:445410f3… which is
+#     already absent. `revision-image-check.yml` in the monorepo now watches for
+#     exactly this, weekly, one hour after the GC sweep.
+#
+# 10 is therefore "10 deploys deep" for both services now, which is a real
+# rollback depth rather than a hedge against preview churn. Prod browser pushes
+# ~0.4/day, so it is still ~25 days there — deliberately more than the 14-day
+# age gate below, so a slow-moving image is never left unprotected by both
+# guards at once.
 #
 # PREPROCESS — the sweep this block used to wait on has now happened (NEO-123).
 #
@@ -202,33 +213,42 @@ resource "google_service_account_iam_member" "deployer_act_as_runtime" {
 # and `delete-stale-pr-images` only matches the `pr-` prefix. They accumulated
 # without bound. `delete-tagged-preprocess` below closes that.
 #
-# ITS NUMBERS DELIBERATELY DO NOT MATCH BROWSER'S. Browser is safe on keep 10 +
-# 14d because its two guards fail in OPPOSITE conditions — dev deploys often so
-# the serving image is always young, prod deploys rarely so it is always near
-# rank 1. That redundancy does not survive being copied to preprocess:
+# PREPROCESS NOW MATCHES BROWSER (keep 10 + 14d) — NEO-130 removed the reason
+# they diverged. Keeping the history here because the divergence looked
+# arbitrary without it, and someone will otherwise "simplify" it back:
 #
-#   * The age gate is inert here. Observed preprocess merge gaps are 15 and 92
-#     days, so for most of the calendar BOTH envs serve an image older than 14
-#     days and only rank protects it.
-#   * Rank is not driven by deploys. `deploy-preview` pushes `pr-<N>` into this
+# NEO-123 shipped preprocess at keep 30 + 180d, deliberately NOT browser's
+# numbers. Browser is safe on 10 + 14d because its two guards fail in OPPOSITE
+# conditions — dev deploys often so the serving image is always young (age gate
+# holds), prod deploys rarely so it is always near rank 1 (rank holds). That
+# redundancy did not survive being copied to preprocess:
+#
+#   * The age gate was inert. Preprocess merge gaps are 15 and 92 days, so for
+#     most of the calendar BOTH envs served an image older than 14 days and only
+#     rank protected it.
+#   * Rank was not driven by deploys. `deploy-preview` pushed `pr-<N>` into this
 #     SAME package on every PR synchronize, and `most_recent_versions` has no
-#     tag_state filter so untagged predecessors hold slots too. Measured on
-#     browser-dev today: 6 of the 10 protected slots are `pr-*`/untagged, and
-#     the whole keep-10 window spans 9 days.
+#     tag_state filter so untagged predecessors held slots too. Measured on
+#     browser-dev at the time: 6 of 10 protected slots were `pr-*`/untagged,
+#     the whole window spanning 9 days.
 #
-# keep 10 + 14d for preprocess is therefore the one combination where both
-# guards can be false at once, and every revision is minScale=0 — a collected
-# serving image means every request cold-starts against a missing digest and
-# fails, unrecoverably, since a revision immutably pins its digest.
+# Both guards false at once ⇒ the policy collects the image the live revision
+# pins ⇒ at minScale=0 every request cold-starts against a missing digest and
+# fails, unrecoverably.
 #
-# So: keep stays at 30, and the age gate is 180d — comfortably past the 92-day
-# worst observed gap. The residual case needs 30 newer versions AND no merge for
-# 180 days, and those are anti-correlated: preview churn only happens while
-# someone is actively working on preprocess, and active work ends in merges that
-# refresh the serving image.
+# NEO-130 fixed the cause rather than the symptom: previews now push to
+# `<service>-preview`, so rank in THIS package is driven only by merges. The
+# second bullet no longer holds, the first stops mattering (a low-cadence
+# service is exactly one whose serving image sits at rank 1), and 10 + 14d is
+# sound here for the same reason it is for browser.
 #
-# The structural fix — pushing previews to a separate package so rank means
-# "deploys deep" — is tracked separately and would let these match browser's.
+# Prerequisites, both satisfied before this landed:
+#   * previews are out of this package (NEO-130, monorepo b1834e2)
+#   * the historical backlog was swept, so nothing pre-split is left consuming
+#     the window — dev and prod each held exactly 1 image
+#
+# Backstop: `revision-image-check.yml` in the monorepo asserts weekly that every
+# serving revision's digest still exists, one hour after the GC sweep.
 #
 # Repo cap is 10 cleanup policies; this uses 6.
 #
@@ -274,10 +294,10 @@ resource "google_artifact_registry_repository" "gcr_io" {
     action = "KEEP"
 
     most_recent_versions {
+      # Matches browser since NEO-130 — previews no longer share this package,
+      # so 10 means 10 DEPLOYS deep rather than 10 pushes of mixed provenance.
       package_name_prefixes = ["neonbinder-preprocess"]
-      # 30, NOT browser's 10 — see the rationale above. PR previews share this
-      # package, so rank is consumed by churn rather than by deploys.
-      keep_count = 30
+      keep_count            = 10
     }
   }
 
@@ -315,20 +335,19 @@ resource "google_artifact_registry_repository" "gcr_io" {
     }
   }
 
-  # Same intent as delete-tagged-browser, DIFFERENT numbers on purpose. Until
+  # Same intent AND same numbers as delete-tagged-browser since NEO-130. Until
   # NEO-123 nothing matched preprocess main-line images (`<full-sha>` + `latest`
   # are TAGGED, so delete-old-untagged skips them and delete-stale-pr-images only
   # matches `pr-`), so they grew without bound. This collects them.
   #
-  # 180 days, NOT browser's 14. Preprocess merges have gaps of 15 and 92 days, so
-  # a 14-day gate would be inert most of the time and rank would be the only
-  # guard — while PR previews push into this same package and consume rank. That
-  # is the exact combination the block above explains cannot be allowed here, and
-  # a collected serving image is unrecoverable at minScale=0.
+  # Shipped at 180d under NEO-123 because previews then shared this package and
+  # could bury the serving image past the keep window while the age gate was
+  # inert — see the rationale block above. NEO-130 moved previews out, so the
+  # 14-day gate is now backed by a rank guard that only merges advance, exactly
+  # as it is for browser.
   #
-  # Reclaim is still worth having: preprocess images carry torch plus ~375MB of
-  # baked SAM weights, so each collected version frees far more than a browser
-  # one, even at this cadence.
+  # Reclaim matters more here than for browser: preprocess images carry torch
+  # plus ~375MB of baked SAM weights, so each collected version frees far more.
   cleanup_policies {
     id     = "delete-tagged-preprocess"
     action = "DELETE"
@@ -336,7 +355,7 @@ resource "google_artifact_registry_repository" "gcr_io" {
     condition {
       tag_state             = "TAGGED"
       package_name_prefixes = ["neonbinder-preprocess"]
-      older_than            = "15552000s" # 180 days
+      older_than            = "1209600s" # 14 days
     }
   }
 
