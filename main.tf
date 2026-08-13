@@ -1895,13 +1895,27 @@ locals {
     Secret Manager access broke.
 
     Check, in order:
-    1. `gcloud scheduler jobs list --location=${var.gcp_region} --project=${var.gcp_project_id}`
+    1. Did the canary actually stop, or is only ONE SERIES quiet? Confirm with
+       the metric grouped by platform:
+       `logging.googleapis.com/user/browser_login_duration_ms`,
+       `metric.label.canary="true"`. If canary logins are still landing every
+       30 minutes, this alert is lying — see the note below.
+    2. `gcloud scheduler jobs list --location=${var.gcp_region} --project=${var.gcp_project_id}`
        — are the jobs present and ENABLED (not PAUSED)?
-    2. The Scheduler job's own error log:
+    3. The Scheduler job's own error log:
        `resource.type="cloud_scheduler_job"` — an attempt abandoned at the
        180s deadline is recorded here even when the service logs nothing.
-    3. Whether anyone paused the canary during an incident and forgot to
+    4. Whether anyone paused the canary during an incident and forgot to
        re-enable it.
+
+    If this alert names a `revision_name` that is NOT the revision currently
+    serving traffic, treat it as a false positive and check the condition's
+    aggregation. Before NEO-153 this condition had no `group_by_fields`, so
+    Monitoring kept one series PER CLOUD RUN REVISION: every deploy left the
+    outgoing revision permanently silent and fired this alert 90 minutes later,
+    several times a day, while the canary was perfectly healthy. The fix groups
+    on `metric.label.platform` so absence means "no canary login on ANY
+    revision". If revision-scoped alerts reappear, that grouping has regressed.
 
     ${local.neo43_runbook_common}
   EOT
@@ -2170,15 +2184,40 @@ resource "google_monitoring_alert_policy" "browser_login_canary_absent" {
       # that tightens the schedules.
       duration = var.login_canary_absence_duration
 
-      # ALIGN_DELTA, not ALIGN_COUNT: browser_login_duration_ms is
-      # DELTA/DISTRIBUTION, and the API rejects ALIGN_COUNT for that
-      # combination ("The aligner cannot be applied to metrics with kind
-      # DELTA and value type DISTRIBUTION"). Absence detection only needs the
-      # series to have data at all, so the canonical DELTA aligner is right —
-      # we are asking "did any canary login complete", not "how many".
+      # NEO-153: group_by_fields here is LOAD-BEARING, not tidiness.
+      #
+      # Without a cross_series_reducer + group_by_fields, Monitoring keys the
+      # series on the FULL label set — which includes
+      # resource.labels.revision_name. Every browser deploy creates a new Cloud
+      # Run revision; the outgoing revision stops emitting canary logs the
+      # moment traffic moves; 90 minutes later this detector fires for a
+      # revision that is dead by design. Alert frequency therefore tracked
+      # DEPLOY frequency rather than service health — it was firing several
+      # times a day while the canary sat at 48/48 success on both platforms.
+      #
+      # Grouping on platform alone collapses every revision into one series per
+      # platform, so absence means what it is supposed to mean: no canary login
+      # completed for that marketplace on ANY revision.
+      #
+      # The other three NEO-43 policies already do this (failures, HTTP status,
+      # latency). This one was the sole omission, and absence is the one
+      # condition type where omitting it produces FALSE POSITIVES rather than a
+      # harmless split — a series going quiet IS the entire signal.
+      #
+      # ALIGN_PERCENTILE_99 + REDUCE_MAX rather than ALIGN_DELTA + REDUCE_SUM:
+      # this is the exact aggregation the latency policy above already applies
+      # to THIS metric, so it is proven API-valid in this project. That matters
+      # because provider-valid is not API-valid here — ALIGN_COUNT on
+      # DELTA/DISTRIBUTION was rejected at apply time, which is why the aligner
+      # was ALIGN_DELTA to begin with, and summing distributions across series
+      # is not proven. A percentile aligner still emits NO point when the series
+      # has no data, which is all absence detection needs; the aligned value
+      # itself is never compared against anything.
       aggregations {
-        alignment_period   = "600s"
-        per_series_aligner = "ALIGN_DELTA"
+        alignment_period     = "600s"
+        per_series_aligner   = "ALIGN_PERCENTILE_99"
+        cross_series_reducer = "REDUCE_MAX"
+        group_by_fields      = ["metric.label.platform"]
       }
 
       trigger {
