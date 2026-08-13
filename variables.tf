@@ -184,6 +184,20 @@ variable "create_preprocess_fixtures_bucket" {
   default     = false
 }
 
+# NEO-148: unlike create_prizes_bucket (prod only), this is set true in BOTH
+# dev.tfvars and prod.tfvars — the placeholder pairing-review feature must be
+# developable in dev, not just live in prod. Default is false (matching
+# create_prizes_bucket / create_preprocess_fixtures_bucket's convention of
+# defaulting off and opting each environment in explicitly via .tfvars)
+# rather than true — both tfvars files already set it explicitly, so this
+# only changes what a THIRD, not-yet-existing environment would get by
+# default: nothing, until someone deliberately opts it in.
+variable "create_placeholder_bucket" {
+  description = "Whether to create the placeholder-uploads GCS bucket (dev + prod)."
+  type        = bool
+  default     = false
+}
+
 # NEO-95: the google_billing_budget resource is scoped to the BILLING ACCOUNT,
 # not a project — it must be created exactly once, not once per environment
 # apply. Gate it behind this flag and only set it true in prod.tfvars, so the
