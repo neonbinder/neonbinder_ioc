@@ -106,6 +106,29 @@ resource "google_project_iam_member" "deployer_artifactregistry_writer" {
 
 # objectAdmin (not storage.admin) — deployer only needs to push/pull Docker images
 # to GCR, not create/delete buckets
+#
+# NEO-148 security-audit note (2026-08-13, NOT scoped by this change): this
+# grant is project-level `storage.objectAdmin`, so it applies to EVERY bucket
+# in the project — including the new `placeholder_uploads` bucket added
+# above, which holds end-user-uploaded content for the first time. Until this
+# grant existed alongside only build-artifact buckets (GCR's legacy
+# `artifacts.<project>.appspot.com` backing bucket), that breadth was benign;
+# now it means the browser deployer SA can also read/overwrite/delete any
+# user's placeholder upload. In dev, `browser_wif_allow_pull_requests = true`
+# widens who can mint a token for this SA (any same-repo PR), so the exposure
+# isn't purely theoretical there.
+#
+# Recommended follow-up: scope this to the GCR backing bucket(s) via an IAM
+# condition (e.g. `resource.name.startsWith("projects/_/buckets/artifacts.")`)
+# — NOT applied here. This repo's CI/CD deploy pipeline (browser-deploy.yml)
+# depends on this grant for every `docker push gcr.io/...`, and confirming
+# the condition is correctly scoped requires observing a real `terraform
+# plan`/`apply` and a live deploy against it — this worktree has no GCP
+# credentials and is explicitly barred from `terraform apply`. Landing an
+# unverified condition on a project-wide grant a live deploy pipeline depends
+# on risks a silent 403 on the next push, which is worse than the current
+# over-broad-but-working grant. Scope this in a follow-up PR that can
+# actually apply + verify against dev first.
 resource "google_project_iam_member" "deployer_storage_object_admin" {
   project = var.gcp_project_id
   role    = "roles/storage.objectAdmin"
@@ -470,6 +493,13 @@ resource "google_project_iam_member" "runtime_secretmanager_admin" {
 # ──────────────────────────────────────────────
 
 resource "google_cloud_run_service" "neonbinder_browser" {
+  # Deploy workflows (gcloud) name revisions; terraform refreshes those names
+  # into state. Without autogeneration, terraform's next template change
+  # replays the existing revision name with a different config and Cloud Run
+  # 409s ("revision with different configuration already exists") - hit on
+  # the NEO-161 preprocess memory bump, same latent bug here.
+  autogenerate_revision_name = true
+
   name     = var.cloud_run_service_name
   location = var.gcp_region
 
@@ -636,6 +666,130 @@ resource "google_storage_bucket_iam_member" "neonbinder_convex_prizes_admin" {
   bucket = google_storage_bucket.neonbinder_prizes[0].name
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${google_service_account.convex.email}"
+}
+
+# ──────────────────────────────────────────────
+# GCS Bucket for placeholder-upload direct uploads (NEO-148, dev + prod)
+# ──────────────────────────────────────────────
+# Client uploads a zip of scanned placeholder card fronts/backs directly to
+# this bucket via a Convex-minted v4 signed POST policy (see
+# apps/web/convex/adapters/placeholderUploads.ts in the monorepo), then the
+# preprocess service crops it into a pairing-review grid. NEVER public — the
+# signed policy is the sole authorization mechanism.
+
+resource "google_storage_bucket" "placeholder_uploads" {
+  count    = var.create_placeholder_bucket ? 1 : 0
+  name     = "neonbinder-placeholder-uploads-${var.gcp_project_id}"
+  location = var.gcp_region
+
+  uniform_bucket_level_access = true
+
+  # Belt-and-suspenders alongside "NEVER public" above: UBLA already makes a
+  # per-object ACL (the classic way a bucket accidentally goes public)
+  # impossible, but it doesn't stop a future bucket-level `allUsers` IAM
+  # binding. `enforced` makes that binding itself rejected by GCS, so the
+  # policy is that no one on this repo's review can make this bucket public
+  # even by mistake, not just that no one currently has.
+  public_access_prevention = "enforced"
+
+  versioning {
+    enabled = false
+  }
+
+  # Soft delete would otherwise keep a "deleted" object's bytes billable for
+  # its own retention window (defaults to 7 days) ON TOP OF the 7-day
+  # lifecycle-Delete age below — i.e. ~14 days billed, not 7. Zeroing it
+  # makes the Delete lifecycle rule's "7 days" promise actually mean 7 days
+  # of storage cost, not a doubled tail.
+  soft_delete_policy {
+    retention_duration_seconds = 0
+  }
+
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      # 7 days, not the "consumed in minutes" lifetime of the raw zip: the
+      # cropped outputs back a human pairing-review grid that a user may
+      # leave open overnight. 7 days comfortably covers a weekend while still
+      # bounding cost on 200-500MB uploads.
+      age = 7
+    }
+  }
+
+  lifecycle_rule {
+    action {
+      type = "AbortIncompleteMultipartUpload"
+    }
+    condition {
+      age = 1
+    }
+  }
+
+  # GCS CORS origins must be exact strings — no subdomain wildcard is
+  # supported — and Vercel preview URLs are per-deployment and cannot be
+  # enumerated in advance. The signed policy itself is the authorization;
+  # CORS is a browser-enforced same-origin convenience, not a security
+  # boundary, so permitting any origin to *attempt* a POST grants nothing
+  # without a valid signature on that exact object path.
+  #
+  # POST, not PUT: the client uploads via a signed POST policy
+  # (bucket.generateSignedPostPolicyV4, multipart/form-data) rather than a
+  # signed PUT URL, because a POST policy's `content-length-range` condition
+  # is enforced by GCS server-side — the only real way to cap upload size.
+  #
+  # `x-goog-if-generation-match` (the write-once condition the POST policy
+  # sets — see placeholderUploads.ts) is deliberately NOT added to
+  # `response_header` here: it travels as a multipart FORM FIELD in the POST
+  # body, not as a request header, so it is never subject to a CORS
+  # preflight in the first place, and `response_header` controls which
+  # RESPONSE headers this bucket exposes to browser JS
+  # (Access-Control-Expose-Headers) — a request-side field wouldn't be
+  # affected by it either way. Adding it here would be a no-op that misstates
+  # what this list does.
+  cors {
+    origin          = ["*"]
+    method          = ["POST", "OPTIONS"]
+    response_header = ["Content-Type"]
+    max_age_seconds = 3600
+  }
+
+  labels = var.common_labels
+}
+
+# neonbinder-convex mints the signed URL and needs to write the initial
+# object; objectViewer lets it (or downstream Convex logic) read back what
+# was uploaded. It never deletes — the 7-day lifecycle rule above handles
+# cleanup — so objectAdmin is deliberately NOT granted.
+resource "google_storage_bucket_iam_member" "placeholder_uploads_convex_creator" {
+  count  = var.create_placeholder_bucket ? 1 : 0
+  bucket = google_storage_bucket.placeholder_uploads[0].name
+  role   = "roles/storage.objectCreator"
+  member = "serviceAccount:${google_service_account.convex.email}"
+}
+
+resource "google_storage_bucket_iam_member" "placeholder_uploads_convex_viewer" {
+  count  = var.create_placeholder_bucket ? 1 : 0
+  bucket = google_storage_bucket.placeholder_uploads[0].name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.convex.email}"
+}
+
+# preprocess runtime reads the uploaded zip and writes the cropped outputs
+# back into the same prefix. No delete — lifecycle handles cleanup.
+resource "google_storage_bucket_iam_member" "placeholder_uploads_preprocess_viewer" {
+  count  = var.create_placeholder_bucket ? 1 : 0
+  bucket = google_storage_bucket.placeholder_uploads[0].name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.preprocess_runtime.email}"
+}
+
+resource "google_storage_bucket_iam_member" "placeholder_uploads_preprocess_creator" {
+  count  = var.create_placeholder_bucket ? 1 : 0
+  bucket = google_storage_bucket.placeholder_uploads[0].name
+  role   = "roles/storage.objectCreator"
+  member = "serviceAccount:${google_service_account.preprocess_runtime.email}"
 }
 
 # ──────────────────────────────────────────────
@@ -1120,6 +1274,17 @@ resource "google_project_iam_member" "preprocess_deployer_artifactregistry_write
 }
 
 # Deployer needs objectAdmin to push/pull Docker images via GCR's backing GCS.
+#
+# NEO-148 security-audit note (2026-08-13, NOT scoped by this change): same
+# exposure as google_project_iam_member.deployer_storage_object_admin above
+# — this is project-level `storage.objectAdmin`, so it now also covers the
+# new `placeholder_uploads` bucket, not just GCR's backing bucket. Left
+# unscoped for the same reason: this worktree has no GCP credentials and is
+# barred from `terraform apply`, so an IAM-condition change here can't be
+# verified against the real preprocess deploy pipeline before landing. See
+# the sibling comment on the browser deployer's grant for the recommended
+# follow-up (an IAM condition scoping this to the `artifacts.*` bucket,
+# applied and verified in its own PR).
 resource "google_project_iam_member" "preprocess_deployer_storage_object_admin" {
   project = var.gcp_project_id
   role    = "roles/storage.objectAdmin"
@@ -1182,8 +1347,12 @@ resource "google_secret_manager_secret_iam_member" "preprocess_runtime_anthropic
   member    = "serviceAccount:${google_service_account.preprocess_runtime.email}"
 }
 
-# Cloud Run service — 4 CPU / 4Gi / concurrency=3 / max-instances=3 / scale-to-zero
+# Cloud Run service — 4 CPU / 16Gi / concurrency=1 / max-instances=3 / scale-to-zero
 resource "google_cloud_run_service" "neonbinder_preprocess" {
+  # See neonbinder_browser: gcloud-named revisions + a terraform template
+  # change 409 without autogeneration. This unblocked the NEO-161 8Gi apply.
+  autogenerate_revision_name = true
+
   name     = var.preprocess_service_name
   location = var.gcp_region
 
@@ -2522,5 +2691,10 @@ output "preprocess_cloud_run_url" {
 output "wif_provider_preprocess_name" {
   description = "Full resource name of the preprocess WIF provider (set as GCP_WIF_PROVIDER_PREPROCESS[_DEV] GitHub secret)"
   value       = google_iam_workload_identity_pool_provider.github_preprocess.name
+}
+
+output "placeholder_uploads_bucket_name" {
+  description = "Name of the placeholder-uploads GCS bucket (NEO-148; set as GCS_PLACEHOLDER_BUCKET Convex env var)"
+  value       = var.create_placeholder_bucket ? google_storage_bucket.placeholder_uploads[0].name : ""
 }
 

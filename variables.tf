@@ -118,15 +118,23 @@ variable "preprocess_cpu" {
 }
 
 variable "preprocess_memory" {
+  # 16Gi since NEO-161: full BiRefNet's inference activations peak past 8Gi
+  # (measured OOM kills at 4601MiB@4Gi and 8326MiB@8Gi) and the lite model
+  # fails the quality bar (cannot find foil cards on the scanner belt).
+  # Paired with container_concurrency=1 so per-request peaks never stack.
   description = "Memory allocation for the preprocess Cloud Run service"
   type        = string
-  default     = "4Gi"
+  default     = "16Gi"
 }
 
 variable "preprocess_container_concurrency" {
+  # 1 since NEO-161: a single full-BiRefNet inference transiently allocates
+  # multiple GB; concurrent requests on one instance stack those peaks past
+  # any sane limit. Throughput scales via instances (max_instances), not
+  # in-container concurrency.
   description = "Max concurrent requests per preprocess container"
   type        = number
-  default     = 3
+  default     = 1
 }
 
 variable "preprocess_max_instances" {
@@ -180,6 +188,20 @@ variable "create_prizes_bucket" {
 
 variable "create_preprocess_fixtures_bucket" {
   description = "Whether to create the preprocess test-fixture GCS bucket (dev only). Test images for the `services/preprocess` integration tests live here — too large to commit to git. Not needed in prod."
+  type        = bool
+  default     = false
+}
+
+# NEO-148: unlike create_prizes_bucket (prod only), this is set true in BOTH
+# dev.tfvars and prod.tfvars — the placeholder pairing-review feature must be
+# developable in dev, not just live in prod. Default is false (matching
+# create_prizes_bucket / create_preprocess_fixtures_bucket's convention of
+# defaulting off and opting each environment in explicitly via .tfvars)
+# rather than true — both tfvars files already set it explicitly, so this
+# only changes what a THIRD, not-yet-existing environment would get by
+# default: nothing, until someone deliberately opts it in.
+variable "create_placeholder_bucket" {
+  description = "Whether to create the placeholder-uploads GCS bucket (dev + prod)."
   type        = bool
   default     = false
 }
