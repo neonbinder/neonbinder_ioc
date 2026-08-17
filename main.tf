@@ -493,6 +493,13 @@ resource "google_project_iam_member" "runtime_secretmanager_admin" {
 # ──────────────────────────────────────────────
 
 resource "google_cloud_run_service" "neonbinder_browser" {
+  # Deploy workflows (gcloud) name revisions; terraform refreshes those names
+  # into state. Without autogeneration, terraform's next template change
+  # replays the existing revision name with a different config and Cloud Run
+  # 409s ("revision with different configuration already exists") - hit on
+  # the NEO-161 preprocess memory bump, same latent bug here.
+  autogenerate_revision_name = true
+
   name     = var.cloud_run_service_name
   location = var.gcp_region
 
@@ -1342,6 +1349,10 @@ resource "google_secret_manager_secret_iam_member" "preprocess_runtime_anthropic
 
 # Cloud Run service — 4 CPU / 8Gi / concurrency=3 / max-instances=3 / scale-to-zero
 resource "google_cloud_run_service" "neonbinder_preprocess" {
+  # See neonbinder_browser: gcloud-named revisions + a terraform template
+  # change 409 without autogeneration. This unblocked the NEO-161 8Gi apply.
+  autogenerate_revision_name = true
+
   name     = var.preprocess_service_name
   location = var.gcp_region
 
