@@ -1347,7 +1347,7 @@ resource "google_secret_manager_secret_iam_member" "preprocess_runtime_anthropic
   member    = "serviceAccount:${google_service_account.preprocess_runtime.email}"
 }
 
-# Cloud Run service — 4 CPU / 8Gi / concurrency=3 / max-instances=3 / scale-to-zero
+# Cloud Run service — 4 CPU / 16Gi / concurrency=1 / max-instances=3 / scale-to-zero
 resource "google_cloud_run_service" "neonbinder_preprocess" {
   # See neonbinder_browser: gcloud-named revisions + a terraform template
   # change 409 without autogeneration. This unblocked the NEO-161 8Gi apply.

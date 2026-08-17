@@ -118,18 +118,23 @@ variable "preprocess_cpu" {
 }
 
 variable "preprocess_memory" {
-  # 8Gi since NEO-161: the tiered crop strategy holds a ~930MB BiRefNet ONNX
-  # session (~2.5GB resident with ORT arenas) alongside torch, and startup
-  # warm-up OOMed the previous 4Gi limit (4601MiB used at boot).
+  # 16Gi since NEO-161: full BiRefNet's inference activations peak past 8Gi
+  # (measured OOM kills at 4601MiB@4Gi and 8326MiB@8Gi) and the lite model
+  # fails the quality bar (cannot find foil cards on the scanner belt).
+  # Paired with container_concurrency=1 so per-request peaks never stack.
   description = "Memory allocation for the preprocess Cloud Run service"
   type        = string
-  default     = "8Gi"
+  default     = "16Gi"
 }
 
 variable "preprocess_container_concurrency" {
+  # 1 since NEO-161: a single full-BiRefNet inference transiently allocates
+  # multiple GB; concurrent requests on one instance stack those peaks past
+  # any sane limit. Throughput scales via instances (max_instances), not
+  # in-container concurrency.
   description = "Max concurrent requests per preprocess container"
   type        = number
-  default     = 3
+  default     = 1
 }
 
 variable "preprocess_max_instances" {
