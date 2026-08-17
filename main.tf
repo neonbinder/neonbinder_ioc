@@ -1340,7 +1340,7 @@ resource "google_secret_manager_secret_iam_member" "preprocess_runtime_anthropic
   member    = "serviceAccount:${google_service_account.preprocess_runtime.email}"
 }
 
-# Cloud Run service — 4 CPU / 4Gi / concurrency=3 / max-instances=3 / scale-to-zero
+# Cloud Run service — 4 CPU / 8Gi / concurrency=3 / max-instances=3 / scale-to-zero
 resource "google_cloud_run_service" "neonbinder_preprocess" {
   name     = var.preprocess_service_name
   location = var.gcp_region

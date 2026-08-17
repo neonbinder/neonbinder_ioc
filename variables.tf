@@ -118,9 +118,12 @@ variable "preprocess_cpu" {
 }
 
 variable "preprocess_memory" {
+  # 8Gi since NEO-161: the tiered crop strategy holds a ~930MB BiRefNet ONNX
+  # session (~2.5GB resident with ORT arenas) alongside torch, and startup
+  # warm-up OOMed the previous 4Gi limit (4601MiB used at boot).
   description = "Memory allocation for the preprocess Cloud Run service"
   type        = string
-  default     = "4Gi"
+  default     = "8Gi"
 }
 
 variable "preprocess_container_concurrency" {
