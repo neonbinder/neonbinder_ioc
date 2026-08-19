@@ -138,9 +138,16 @@ variable "preprocess_container_concurrency" {
 }
 
 variable "preprocess_max_instances" {
+  # NEO-174: raised 3 -> 20 for the real workload (cropping is almost always
+  # >=10 images; 18 for a print sheet). At container_concurrency = 1, instances
+  # ARE the concurrency ceiling, so this MUST stay equal to the Convex
+  # PREPROCESS_MAX_PARALLELISM env var (apps/web/convex/preprocessCapacity.ts) —
+  # parallelism > instances just 429s; instances > parallelism underutilizes.
+  # maxScale is ~$0 idle (bills only while instances run); one fully-cold
+  # 18-image batch at 20 instances is ~$0.56. Applies to both envs.
   description = "Max Cloud Run instances for the preprocess service"
   type        = number
-  default     = 3
+  default     = 20
 }
 
 variable "wif_branch_ref" {
