@@ -792,6 +792,24 @@ resource "google_storage_bucket_iam_member" "placeholder_uploads_preprocess_crea
   member = "serviceAccount:${google_service_account.preprocess_runtime.email}"
 }
 
+# NEO-175: fast runtime gets the same viewer+creator pair as heavy's runtime
+# SA above — it reads the uploaded zip and writes cropped outputs for every
+# image that settles on the fast path, same objectViewer+objectCreator-only
+# (never objectAdmin) shape as heavy (security control #2).
+resource "google_storage_bucket_iam_member" "placeholder_uploads_preprocess_fast_viewer" {
+  count  = var.create_placeholder_bucket ? 1 : 0
+  bucket = google_storage_bucket.placeholder_uploads[0].name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.preprocess_fast_runtime.email}"
+}
+
+resource "google_storage_bucket_iam_member" "placeholder_uploads_preprocess_fast_creator" {
+  count  = var.create_placeholder_bucket ? 1 : 0
+  bucket = google_storage_bucket.placeholder_uploads[0].name
+  role   = "roles/storage.objectCreator"
+  member = "serviceAccount:${google_service_account.preprocess_fast_runtime.email}"
+}
+
 # ──────────────────────────────────────────────
 # Workload Identity Federation for GitHub Actions
 # ──────────────────────────────────────────────
@@ -1347,6 +1365,74 @@ resource "google_secret_manager_secret_iam_member" "preprocess_runtime_anthropic
   member    = "serviceAccount:${google_service_account.preprocess_runtime.email}"
 }
 
+# ──────────────────────────────────────────────
+# Preprocess FAST runtime SA (NEO-175, security control #2) — dedicated, not
+# shared with heavy's preprocess_runtime. Least-privilege reasons this is its
+# own SA rather than reusing preprocess_runtime: the fast role never touches
+# BiRefNet/SAM and this SA's grant set reflects that (no broader than heavy's,
+# but kept independently auditable — a future tightening of one can never
+# silently affect the other since they share no IAM bindings at all).
+# ──────────────────────────────────────────────
+
+resource "google_service_account" "preprocess_fast_runtime" {
+  # "fast-run", not "-runtime": GCP's account_id has a hard 30-char cap and
+  # "neonbinder-preprocess-fast-runtime" is 34. This is exactly 30.
+  account_id   = "neonbinder-preprocess-fast-run"
+  display_name = "NeonBinder Preprocess Fast Runtime"
+  description  = "Runtime service account for the fast-role preprocess Cloud Run service"
+}
+
+resource "google_project_iam_member" "preprocess_fast_runtime_logging_writer" {
+  project = var.gcp_project_id
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.preprocess_fast_runtime.email}"
+}
+
+# Same secrets as heavy's runtime SA — the fast role's container still gets
+# both INTERNAL_API_KEY and ANTHROPIC_API_KEY via --set-secrets (see the
+# neonbinder_preprocess_fast container block below): INTERNAL_API_KEY for the
+# app-layer header check that runs alongside Cloud Run IAM on every request
+# (both services, unchanged by the T1/T2 lock-down below), ANTHROPIC_API_KEY
+# because the fast role still calls classify_card on an accepted crop.
+resource "google_secret_manager_secret_iam_member" "preprocess_fast_runtime_api_key_access" {
+  secret_id = google_secret_manager_secret.internal_api_key.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.preprocess_fast_runtime.email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "preprocess_fast_runtime_anthropic_access" {
+  secret_id = google_secret_manager_secret.anthropic_api_key.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.preprocess_fast_runtime.email}"
+}
+
+# Allow developers to impersonate the fast runtime SA (local dev parity),
+# mirroring developer_impersonate_preprocess_runtime.
+resource "google_service_account_iam_member" "developer_impersonate_preprocess_fast_runtime" {
+  for_each           = toset(var.developer_emails)
+  service_account_id = google_service_account.preprocess_fast_runtime.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "user:${each.value}"
+}
+
+# Allow the terraform-deployer SA to act as the fast runtime SA during apply
+# (spec.service_account_name on the Cloud Run resource below requires it).
+resource "google_service_account_iam_member" "tf_deployer_act_as_preprocess_fast_runtime" {
+  service_account_id = google_service_account.preprocess_fast_runtime.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.terraform_deployer.email}"
+}
+
+# Allow the preprocess deployer SA to act as the fast runtime SA — same
+# `gcloud run deploy --service-account=...` need as
+# preprocess_deployer_act_as_runtime, for the second service the same
+# pipeline will deploy.
+resource "google_service_account_iam_member" "preprocess_deployer_act_as_fast_runtime" {
+  service_account_id = google_service_account.preprocess_fast_runtime.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.preprocess_deployer.email}"
+}
+
 # Cloud Run service — 4 CPU / 16Gi / concurrency=1 / max-instances=3 / scale-to-zero
 resource "google_cloud_run_service" "neonbinder_preprocess" {
   # See neonbinder_browser: gcloud-named revisions + a terraform template
@@ -1360,7 +1446,10 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
     metadata {
       annotations = {
         "autoscaling.knative.dev/minScale" = "0"
-        "autoscaling.knative.dev/maxScale" = tostring(var.preprocess_max_instances)
+        # NEO-175 Phase 3: repointed from var.preprocess_max_instances (which
+        # now sizes the FAST service — see its variable comment) to the
+        # dedicated heavy variable.
+        "autoscaling.knative.dev/maxScale" = tostring(var.heavy_preprocess_max_instances)
       }
     }
 
@@ -1437,14 +1526,201 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
   }
 }
 
-# Public access gated by INTERNAL_API_KEY header check inside the service,
-# matching the browser service's pattern.
-resource "google_cloud_run_service_iam_member" "preprocess_public_access" {
+# NEO-175 Phase 3 (heavy lock-down, NEO-170 T1+T2): this service used to be
+# reachable by anyone (`allUsers` below) with the app layer's INTERNAL_API_KEY
+# header check as the only real gate — NOT "matching the browser service's
+# pattern" as the comment here previously (and inaccurately) claimed. Browser
+# has been IAM-only since NEO-20 (see google_cloud_run_service_iam_member.
+# convex_invoker's comment near the top of this file): no allUsers binding,
+# Cloud Run IAM is the sole gate, Convex authenticates with a Google OIDC ID
+# token. This block brings heavy to the same posture:
+#
+#   T1 — grant roles/run.invoker to every real caller (below): the
+#        neonbinder-convex SA and the preprocess-deployer SA (CI's post-deploy
+#        smoke tests already mint an OIDC ID token for this SA and expect the
+#        binding to exist — see .github/workflows/preprocess-deploy.yml and
+#        preprocess.yml's "NEO-170 Phase D" smoke-test steps in the monorepo,
+#        which this terraform change is the other half of).
+#   T2 — remove the allUsers binding that follows.
+#
+# CRITICAL ORDERING: T1 must exist before/with T2, or BOTH Convex and CI
+# deploys lose access the moment allUsers is gone. This file lands both in the
+# same change (one PR, one apply) rather than across two — see the deploy
+# runbook for why that is sufficient without an explicit terraform
+# `depends_on` (none is expressible here: T2 is a resource *removed* from
+# config, not one with a lifecycle hook to hang a dependency on).
+resource "google_cloud_run_service_iam_member" "preprocess_convex_invoker" {
   location = google_cloud_run_service.neonbinder_preprocess.location
   service  = google_cloud_run_service.neonbinder_preprocess.name
   role     = "roles/run.invoker"
-  member   = "allUsers"
+  member   = "serviceAccount:${google_service_account.convex.email}"
 }
+
+# See preprocess_convex_invoker's comment directly above — this is T1's other
+# required grant. Mirrors the browser service's deployer_invoker (NEO-20):
+# run.admin (granted elsewhere) covers *managing* the service but not the
+# per-service invoke check CI's smoke test performs against the tagged,
+# not-yet-promoted revision.
+resource "google_cloud_run_service_iam_member" "preprocess_deployer_invoker" {
+  location = google_cloud_run_service.neonbinder_preprocess.location
+  service  = google_cloud_run_service.neonbinder_preprocess.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.preprocess_deployer.email}"
+}
+
+# T2 (see preprocess_convex_invoker's comment above): allUsers invoker
+# REMOVED. Was here pre-NEO-175 as the sole practical gate alongside the app's
+# INTERNAL_API_KEY header check; T1 above supplies every real caller with its
+# own scoped invoker grant instead.
+
+# ──────────────────────────────────────────────
+# Preprocess FAST service — same image, classical-CV-only role (NEO-175)
+# ──────────────────────────────────────────────
+# SAME container image as neonbinder_preprocess above, selected into the fast
+# role by the PREPROCESS_ROLE=fast env var (services/preprocess/app/main.py):
+# it never loads BiRefNet/SAM, so it skips the ~191s startup model-load heavy
+# pays on every cold start. Handles every image first; anything the classical
+# path can't settle comes back with needs_escalation=true and Convex re-routes
+# it to the heavy service above. See apps/web/convex/preprocessCapacity.ts and
+# adapters/preprocess.ts for the Convex-side half of this contract.
+#
+# IAM-only from creation (security control #1) — unlike heavy, this service
+# never had a legacy allUsers caller to transition away from, so it skips
+# heavy's transitional T1-then-T2 shape entirely and goes straight to the end
+# state: no allUsers binding anywhere below.
+resource "google_cloud_run_service" "neonbinder_preprocess_fast" {
+  # See neonbinder_preprocess / neonbinder_browser: gcloud-named revisions +
+  # a terraform template change 409s without autogeneration.
+  autogenerate_revision_name = true
+
+  name     = var.preprocess_fast_service_name
+  location = var.gcp_region
+
+  template {
+    metadata {
+      annotations = {
+        "autoscaling.knative.dev/minScale" = "0"
+        "autoscaling.knative.dev/maxScale" = tostring(var.preprocess_max_instances)
+      }
+    }
+
+    spec {
+      container_concurrency = var.preprocess_fast_container_concurrency
+      timeout_seconds       = 300
+      service_account_name  = google_service_account.preprocess_fast_runtime.email
+
+      containers {
+        # Same image as heavy — the role split is entirely env-var-driven
+        # (PREPROCESS_ROLE below), not a separate build or Dockerfile. CI
+        # manages the tag thereafter, same as preprocess_image's own comment.
+        image = var.preprocess_image
+
+        resources {
+          limits = {
+            cpu    = var.preprocess_fast_cpu
+            memory = var.preprocess_fast_memory
+          }
+        }
+
+        env {
+          name = "INTERNAL_API_KEY"
+          value_from {
+            secret_key_ref {
+              name = google_secret_manager_secret.internal_api_key.secret_id
+              key  = "latest"
+            }
+          }
+        }
+
+        env {
+          name = "ANTHROPIC_API_KEY"
+          value_from {
+            secret_key_ref {
+              name = google_secret_manager_secret.anthropic_api_key.secret_id
+              key  = "latest"
+            }
+          }
+        }
+
+        env {
+          name  = "ENVIRONMENT"
+          value = var.environment
+        }
+
+        env {
+          name  = "GOOGLE_CLOUD_PROJECT"
+          value = var.gcp_project_id
+        }
+
+        # The whole reason this is a separate service: selects the fast role
+        # in services/preprocess/app/main.py (_preprocess_role()). Heavy sets
+        # nothing and gets the default ("heavy") — see that service's
+        # container block above.
+        env {
+          name  = "PREPROCESS_ROLE"
+          value = "fast"
+        }
+      }
+    }
+  }
+
+  traffic {
+    percent         = 100
+    latest_revision = true
+  }
+
+  # Vision API dependency mirrors heavy: no bespoke IAM role exists for Cloud
+  # Vision (classic vision.googleapis.com has no narrow predefined role in
+  # this provider's IAM surface — heavy's runtime SA has never held one
+  # either, confirmed by grep across this file), so enabling the API is the
+  # only prerequisite either service needs.
+  depends_on = [google_project_service.vision_api]
+
+  lifecycle {
+    # Mirrors neonbinder_preprocess's lifecycle block above — same deploy-
+    # workflow-owns-traffic / gcloud-annotation-churn rationale.
+    ignore_changes = [
+      template[0].spec[0].containers[0].image,
+      traffic,
+      template[0].metadata[0].annotations["run.googleapis.com/client-name"],
+      template[0].metadata[0].annotations["run.googleapis.com/client-version"],
+      template[0].metadata[0].labels,
+    ]
+  }
+}
+
+# Security control #1: convex SA only, no allUsers. See the service comment
+# above for why this service skips heavy's transitional shape.
+resource "google_cloud_run_service_iam_member" "preprocess_fast_convex_invoker" {
+  location = google_cloud_run_service.neonbinder_preprocess_fast.location
+  service  = google_cloud_run_service.neonbinder_preprocess_fast.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.convex.email}"
+}
+
+# Pre-provisions for the fast-service CI deploy lane (not yet built — the
+# monorepo's preprocess.yml / preprocess-deploy.yml only deploy to the heavy
+# service today; see the deploy runbook). Granted now, alongside the service
+# itself, rather than deferred: unlike heavy's deployer_invoker (a transitional
+# grant paired with removing allUsers), fast has no allUsers to transition
+# away from, so ANY future smoke test against it needs this from the start.
+# Same SA as heavy's deployer_invoker — one deploy pipeline, same image,
+# both services.
+resource "google_cloud_run_service_iam_member" "preprocess_fast_deployer_invoker" {
+  location = google_cloud_run_service.neonbinder_preprocess_fast.location
+  service  = google_cloud_run_service.neonbinder_preprocess_fast.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.preprocess_deployer.email}"
+}
+
+# Security control #4: deliberately NO run.invoker grant here for
+# preprocess_fast_runtime on ANY service (this one or heavy) — do not
+# replicate preprocess_runtime_invoker's self-invoker pattern for fast. The
+# fast runtime SA has no reason to call any Cloud Run service: Vision API and
+# GCS are not Cloud Run, and it never calls heavy directly — escalation is a
+# Convex-side re-enqueue (apps/web/convex/placeholderHeavyPool.ts), not a
+# fast-to-heavy service call. Zero fast-to-heavy (or fast-to-self) invoker
+# grants exist anywhere in this file; keep it that way.
 
 # WIF provider dedicated to the preprocess deploy lane. Since NEO-123 that lane
 # lives in the monorepo, so this provider and `github` above trust the SAME repo.
@@ -2696,5 +2972,15 @@ output "wif_provider_preprocess_name" {
 output "placeholder_uploads_bucket_name" {
   description = "Name of the placeholder-uploads GCS bucket (NEO-148; set as GCS_PLACEHOLDER_BUCKET Convex env var)"
   value       = var.create_placeholder_bucket ? google_storage_bucket.placeholder_uploads[0].name : ""
+}
+
+output "preprocess_fast_runtime_service_account_email" {
+  description = "Email of the preprocess FAST runtime service account (NEO-175)"
+  value       = google_service_account.preprocess_fast_runtime.email
+}
+
+output "preprocess_fast_cloud_run_url" {
+  description = "URL of the deployed preprocess FAST Cloud Run service (NEO-175; set as NEONBINDER_PREPROCESS_FAST_URL Convex env var)"
+  value       = google_cloud_run_service.neonbinder_preprocess_fast.status[0].url
 }
 
