@@ -1497,6 +1497,21 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
           name  = "GOOGLE_CLOUD_PROJECT"
           value = var.gcp_project_id
         }
+
+        # NEO-175: closes pre-existing out-of-band drift on the live dev
+        # service (see the deploy runbook's "Incidental finding" section) —
+        # someone set GCS_PLACEHOLDER_BUCKET directly on Cloud Run, outside
+        # terraform, sometime after NEO-148. Without this block, an apply
+        # would REMOVE it, breaking the pipeline that reads it (/extract,
+        # /process-entry). Guarded by create_placeholder_bucket the same way
+        # the placeholder_uploads_bucket_name output is, so this can't index
+        # into a zero-count resource in a hypothetical environment where the
+        # bucket isn't created (today, both dev.tfvars and prod.tfvars set it
+        # true).
+        env {
+          name  = "GCS_PLACEHOLDER_BUCKET"
+          value = var.create_placeholder_bucket ? google_storage_bucket.placeholder_uploads[0].name : ""
+        }
       }
     }
   }
@@ -1659,6 +1674,16 @@ resource "google_cloud_run_service" "neonbinder_preprocess_fast" {
         env {
           name  = "PREPROCESS_ROLE"
           value = "fast"
+        }
+
+        # NEO-175: fast reads/writes the same placeholder GCS bucket heavy
+        # does (Convex routes /extract and /process-entry to whichever
+        # service is handling a given request) — see neonbinder_preprocess's
+        # GCS_PLACEHOLDER_BUCKET env block above for the out-of-band-drift
+        # context that made this load-bearing on dev in the first place.
+        env {
+          name  = "GCS_PLACEHOLDER_BUCKET"
+          value = var.create_placeholder_bucket ? google_storage_bucket.placeholder_uploads[0].name : ""
         }
       }
     }
