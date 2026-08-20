@@ -139,15 +139,113 @@ variable "preprocess_container_concurrency" {
 
 variable "preprocess_max_instances" {
   # NEO-174: raised 3 -> 20 for the real workload (cropping is almost always
-  # >=10 images; 18 for a print sheet). At container_concurrency = 1, instances
-  # ARE the concurrency ceiling, so this MUST stay equal to the Convex
-  # PREPROCESS_MAX_PARALLELISM env var (apps/web/convex/preprocessCapacity.ts) —
-  # parallelism > instances just 429s; instances > parallelism underutilizes.
-  # maxScale is ~$0 idle (bills only while instances run); one fully-cold
-  # 18-image batch at 20 instances is ~$0.56. Applies to both envs.
-  description = "Max Cloud Run instances for the preprocess service"
+  # >=10 images; 18 for a print sheet).
+  #
+  # NEO-175 Phase 3 REPOINT: this variable now sizes the FAST service
+  # (neonbinder-preprocess-fast), not the heavy one. The name is unchanged
+  # deliberately — it is what the already-shipped Convex code
+  # (apps/web/convex/preprocessCapacity.ts, `PREPROCESS_MAX_PARALLELISM`) has
+  # documented itself as pairing with since before the split existed, and
+  # since every image hits the fast service first, "preprocess" unqualified
+  # continuing to mean "the default/common-path service" is the least
+  # surprising reading. The heavy-only ceiling now has its own variable,
+  # `heavy_preprocess_max_instances`, below.
+  #
+  # Unlike heavy, instances are NOT the fast service's concurrency ceiling by
+  # themselves — fast runs container_concurrency = 8 (see
+  # preprocess_fast_container_concurrency below), so each instance serves up
+  # to 8 requests at once. The Convex/terraform pairing invariant is still
+  # exact equality by contract (apps/web/convex/preprocessCapacity.ts's own
+  # comment), just conservative in the fast case: it pins dispatch parallelism
+  # to instance count only, leaving each instance's extra concurrency headroom
+  # as unused margin rather than additional throughput. Raising this further
+  # is cheap (maxScale is ~$0 idle) and a reasonable NEO-174-style follow-up,
+  # deliberately not bundled into this security-focused change.
+  description = "Max Cloud Run instances for the preprocess FAST service (neonbinder-preprocess-fast). MUST equal the Convex PREPROCESS_MAX_PARALLELISM env var in the same environment."
   type        = number
   default     = 20
+}
+
+variable "heavy_preprocess_max_instances" {
+  # NEO-175 Phase 3: split out of the old (pre-split) `preprocess_max_instances`
+  # so the heavy service's escalation-only ceiling can be tuned independently
+  # of the fast service's every-image ceiling. Default kept at 20 — heavy's
+  # PRE-split value — deliberately unchanged rather than lowered to reflect
+  # "heavy now serves only a minority of images (escalations)": that is a real
+  # capacity/cost tuning opportunity, but bundling a capacity cut into a
+  # security lock-down PR (NEO-175's allUsers removal, see the heavy Cloud Run
+  # IAM resources) would make a plan diff harder to review and a regression
+  # harder to attribute. Revisit downward once real escalation-rate telemetry
+  # exists (see apps/web/convex/placeholderHeavyPool.ts).
+  #
+  # At container_concurrency = 1 (same reasoning as the pre-split value:
+  # BiRefNet's per-request peak allocation means requests cannot stack on one
+  # instance), so instances ARE this service's total concurrent capacity —
+  # same exact-equality contract as before, now against Convex's
+  # HEAVY_PREPROCESS_MAX_PARALLELISM (apps/web/convex/preprocessCapacity.ts)
+  # instead of the unqualified PREPROCESS_MAX_PARALLELISM.
+  description = "Max Cloud Run instances for the preprocess HEAVY service (neonbinder-preprocess, the full BiRefNet cascade). MUST equal the Convex HEAVY_PREPROCESS_MAX_PARALLELISM env var in the same environment."
+  type        = number
+  default     = 20
+}
+
+variable "preprocess_fast_service_name" {
+  description = "Name for the preprocess FAST Cloud Run service (NEO-175)"
+  type        = string
+  default     = "neonbinder-preprocess-fast"
+}
+
+variable "preprocess_fast_cpu" {
+  # 2 vCPU for 8-way concurrency of CPU-bound classical CV (OpenCV contour /
+  # edge detection) — oversubscribed 4:1, which is fine here: each request is
+  # meant to be seconds-fast (no model load), so brief CPU contention under
+  # concurrency does not reintroduce the ~191s cold-start problem this split
+  # exists to avoid. Unmeasured (no fast service has run in production yet);
+  # revisit against real Cloud Run CPU-utilization telemetry after the first
+  # production week.
+  description = "CPU allocation for the preprocess FAST Cloud Run service"
+  type        = string
+  default     = "2000m"
+}
+
+variable "preprocess_fast_memory" {
+  # Security control #5: sized for container_concurrency x peak-decode-RAM,
+  # not guessed. Grounded in the service's own code-enforced caps
+  # (services/preprocess/app/imaging.py, app/main.py) rather than observed
+  # numbers, because no fast instance has run in production yet to measure:
+  #
+  #   - MAX_IMAGE_PIXELS = 50_000_000 (app/imaging.py) is a hard-enforced
+  #     decode-time cap. A decoded RGB raster at that ceiling is
+  #     50_000_000 x 3 bytes = ~150MB; classical CV holds several derived
+  #     working copies at once (grayscale conversion, edge map, contour
+  #     scratch, resized candidates) rather than one buffer, so budget ~4x the
+  #     base raster as a single request's peak: ~600MB.
+  #   - MAX_IMAGE_BYTES = 32MB (app/main.py) bounds the compressed upload, not
+  #     the decode — already dominated by the pixel-count bound above for any
+  #     realistic phone-camera JPEG, so it does not change the estimate.
+  #
+  # 8 concurrent requests x ~600MB peak = ~4.8Gi, plus a fixed ~800Mi-1Gi
+  # baseline for the Python/uvicorn/FastAPI process itself (not per-request).
+  # Rounds up to 8Gi for headroom rather than sitting right at the computed
+  # floor — this is a first-cut engineering estimate, not a measured number;
+  # revisit against real Cloud Run memory-utilization telemetry (per-instance
+  # memory/utilizations metric) after the first production week, same as
+  # preprocess_fast_cpu above.
+  description = "Memory allocation for the preprocess FAST Cloud Run service"
+  type        = string
+  default     = "8Gi"
+}
+
+variable "preprocess_fast_container_concurrency" {
+  # 8, not heavy's 1: FAST never loads a model, so a request's peak allocation
+  # is the bounded classical-CV working set costed in preprocess_fast_memory
+  # above, not BiRefNet's multi-GB inference spike — many can safely stack on
+  # one instance. Throughput scales via both instances (preprocess_max_instances,
+  # reused for fast — see its own comment) and in-container concurrency, unlike
+  # heavy where only instances count.
+  description = "Max concurrent requests per preprocess FAST container"
+  type        = number
+  default     = 8
 }
 
 variable "wif_branch_ref" {
