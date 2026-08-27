@@ -697,10 +697,10 @@ resource "google_storage_bucket" "placeholder_uploads" {
   }
 
   # Soft delete would otherwise keep a "deleted" object's bytes billable for
-  # its own retention window (defaults to 7 days) ON TOP OF the 7-day
-  # lifecycle-Delete age below — i.e. ~14 days billed, not 7. Zeroing it
-  # makes the Delete lifecycle rule's "7 days" promise actually mean 7 days
-  # of storage cost, not a doubled tail.
+  # its own retention window (defaults to 7 days) ON TOP OF the 2-day
+  # lifecycle-Delete age below — i.e. ~9 days billed, not 2. Zeroing it
+  # makes the Delete lifecycle rule's "2 days" promise actually mean 2 days
+  # of storage cost, not a padded tail.
   soft_delete_policy {
     retention_duration_seconds = 0
   }
@@ -710,11 +710,16 @@ resource "google_storage_bucket" "placeholder_uploads" {
       type = "Delete"
     }
     condition {
-      # 7 days, not the "consumed in minutes" lifetime of the raw zip: the
-      # cropped outputs back a human pairing-review grid that a user may
-      # leave open overnight. 7 days comfortably covers a weekend while still
-      # bounding cost on 200-500MB uploads.
-      age = 7
+      # 2 days, not the "consumed in minutes" lifetime of the raw uploads.
+      # The pairing-review grid (apps/web/app/print/placeholders/intake.tsx)
+      # DOES read this bucket's crops through re-minted signed URLs, so this
+      # age is the real bound on how long a user can leave that grid open --
+      # past it the images 404, not merely cost money. 2 days covers a review
+      # left open overnight and resumed the next day, which is the longest
+      # session this flow is meant to support; anything staler should be
+      # re-uploaded rather than kept billable. Uploads are 200-500MB, so the
+      # tail is the whole cost story for this bucket.
+      age = 2
     }
   }
 
@@ -760,7 +765,7 @@ resource "google_storage_bucket" "placeholder_uploads" {
 
 # neonbinder-convex mints the signed URL and needs to write the initial
 # object; objectViewer lets it (or downstream Convex logic) read back what
-# was uploaded. It never deletes — the 7-day lifecycle rule above handles
+# was uploaded. It never deletes — the 2-day lifecycle rule above handles
 # cleanup — so objectAdmin is deliberately NOT granted.
 resource "google_storage_bucket_iam_member" "placeholder_uploads_convex_creator" {
   count  = var.create_placeholder_bucket ? 1 : 0
