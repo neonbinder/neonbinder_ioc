@@ -710,11 +710,15 @@ resource "google_storage_bucket" "placeholder_uploads" {
       type = "Delete"
     }
     condition {
-      # 2 days, not the "consumed in minutes" lifetime of the raw zip: the
-      # scanner flow reviews and finalizes crops in real time, so there's no
-      # human pairing-review grid left open overnight to protect here (that
-      # leave-open web review grid is NEO-152's concern, not this bucket's).
-      # 2 days is plenty of margin while bounding cost on 200-500MB uploads.
+      # 2 days, not the "consumed in minutes" lifetime of the raw uploads.
+      # The pairing-review grid (apps/web/app/print/placeholders/intake.tsx)
+      # DOES read this bucket's crops through re-minted signed URLs, so this
+      # age is the real bound on how long a user can leave that grid open --
+      # past it the images 404, not merely cost money. 2 days covers a review
+      # left open overnight and resumed the next day, which is the longest
+      # session this flow is meant to support; anything staler should be
+      # re-uploaded rather than kept billable. Uploads are 200-500MB, so the
+      # tail is the whole cost story for this bucket.
       age = 2
     }
   }
