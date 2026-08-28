@@ -1466,6 +1466,34 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
       containers {
         image = var.preprocess_image
 
+        # NEO-194: give the BiRefNet load room to finish before Cloud Run gives
+        # up on the revision. Without this block Cloud Run applies its default
+        # -- ONE tcp attempt with a 240s deadline -- and the model load
+        # (measured 116-190s on dev) plus the heavy python imports regularly
+        # crossed it. A failed startup probe destroys the revision, so this was
+        # not a slow start, it was 7 prod and 100+ dev failures in 14 days and
+        # one broken release.
+        #
+        # The container deliberately does NOT listen until the model is
+        # resident: blocking here is what guarantees an instance is warm before
+        # it serves. That matters more than it looks, because
+        # container_concurrency=1 means any second concurrent request starts a
+        # NEW instance -- so a client cannot warm its way to safety, and an
+        # instance that could serve cold would hand a ~3 minute request to
+        # whoever reached it first.
+        startup_probe {
+          period_seconds    = var.heavy_preprocess_startup_probe_period_seconds
+          failure_threshold = var.heavy_preprocess_startup_probe_failure_threshold
+          # A TCP connect either answers at once or not at all, so the per-probe
+          # timeout only needs to cover the round trip. The budget lives in
+          # period x failure_threshold, not here. Must be <= period_seconds.
+          timeout_seconds = 10
+
+          tcp_socket {
+            port = 8080
+          }
+        }
+
         resources {
           limits = {
             cpu    = var.preprocess_cpu
