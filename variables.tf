@@ -137,6 +137,40 @@ variable "preprocess_container_concurrency" {
   default     = 1
 }
 
+variable "heavy_preprocess_startup_probe_period_seconds" {
+  # NEO-194. The heavy service loads ~930MB of BiRefNet before it can serve,
+  # measured at 116-190s on dev (p50 ~160s, spread 74s) with the
+  # torch/transformers/rembg/onnxruntime imports still to pay on top. Cloud
+  # Run's DEFAULT startup probe is one TCP attempt with a 240s deadline, so
+  # that load was consuming ~80% of the budget and losing the race outright 7
+  # times in prod and 100+ times on dev over 14 days -- a failed startup probe
+  # DESTROYS the revision, which is how it took down the NEO-191 release.
+  #
+  # period x failure_threshold is the real budget; 30 x 20 = 600s, a bit over
+  # 3x the observed worst case. The provider caps a startup probe's period at
+  # 240s, so headroom has to come from the threshold rather than the period.
+  #
+  # The alternative -- warming in a background thread so the container listens
+  # immediately -- was built and rejected (see the NEO-194 discussion on
+  # neonbinder#195): it moves the load INSIDE the request, where it is charged
+  # against Cloud Run's 300s request cap and every client's timeout, and it
+  # lets an instance serve while cold. Blocking startup is what guarantees
+  # "warm before serving", and with container_concurrency=1 that guarantee is
+  # load-bearing: any second concurrent request starts a NEW instance, so
+  # clients cannot warm their way out of it.
+  description = "Seconds between startup probe attempts for the heavy preprocess service"
+  type        = number
+  default     = 30
+}
+
+variable "heavy_preprocess_startup_probe_failure_threshold" {
+  # Paired with the period above: 30 x 20 = 600s of startup budget. See that
+  # variable for why the budget has to be this large.
+  description = "Startup probe attempts before the heavy preprocess revision is failed"
+  type        = number
+  default     = 20
+}
+
 variable "preprocess_max_instances" {
   # NEO-174: raised 3 -> 20 for the real workload (cropping is almost always
   # >=10 images; 18 for a print sheet).
