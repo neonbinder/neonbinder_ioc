@@ -2098,7 +2098,7 @@ resource "google_logging_metric" "browser_login_failures" {
     labels {
       key         = "error_class"
       value_type  = "STRING"
-      description = "bad_key_format | timeout | invalid_credentials | challenge | oom | other | missing_key; empty when the service could not classify"
+      description = "bad_key_format | timeout | invalid_credentials | challenge | oom | other | missing_key | reauth_required; empty when the service could not classify"
     }
     labels {
       key         = "challenge_detected"
@@ -2338,12 +2338,20 @@ locals {
     # Marketplace login failures — $${metric.label.platform}
 
     3+ login failures in 5 minutes on **$${metric.label.platform}**, excluding
-    caller-side errors (invalid_credentials, bad_key_format, missing_key). A
-    seller is very likely stuck right now.
+    caller-side errors (invalid_credentials, bad_key_format, missing_key,
+    reauth_required). A seller is very likely stuck right now.
 
     First: read `error_class` on the failing lines. `timeout` -> marketplace
     slow or wedged. `challenge` -> captcha/bot check. `oom` -> container
     memory. `other` -> read the raw message, it matched no known pattern.
+
+    `reauth_required` is excluded from THIS policy on purpose: it means the
+    seller has no live session and no password on file for us to mint a new
+    one (NEO-141), which the app already surfaces in-product — the seller
+    signs in again on Profile -> Credentials. It is caller-side state, not a
+    marketplace or service failure, and is NOT an incident here even at
+    volume. A runaway volume of it (a retry loop rather than a normal lapsed
+    session) is tracked separately — see "Reauth required" below.
 
     ${local.neo43_runbook_common}
   EOT
@@ -2422,6 +2430,29 @@ locals {
 
     ${local.neo43_runbook_common}
   EOT
+
+  # NEO-278 companion to neo43_doc_failures's reauth_required exclusion — a
+  # separate, low-noise signal so a runaway retry loop still gets noticed
+  # without paging on every lapsed session.
+  neo43_doc_reauth_required = <<-EOT
+    # Reauth required volume — $${metric.label.platform}
+
+    50+ `reauth_required` login calls in 30 minutes on
+    **$${metric.label.platform}**. A single one of these is normal: the
+    seller has no live session and no password on file, and the app already
+    tells them to sign in again on Profile -> Credentials (NEO-141). This
+    policy exists only to catch sustained volume — something retrying a
+    reauth-required login over and over rather than surfacing it to the
+    seller and stopping.
+
+    Find the caller: read `browser_login_call` lines with
+    `error_class="reauth_required"` for **$${metric.label.platform}** and
+    check what is calling it repeatedly (a sync cron, a retry loop, a stuck
+    queue). This is NOT a marketplace or browser-service problem — do not
+    treat it like the NEO-43 failures policy.
+
+    ${local.neo43_runbook_common}
+  EOT
 }
 
 # --- Alert policies ---------------------------------------------------------
@@ -2484,9 +2515,14 @@ resource "google_monitoring_alert_policy" "browser_login_failures" {
 
     condition_threshold {
       # The error_class exclusions are what make this alert survivable.
-      # invalid_credentials / bad_key_format / missing_key are all CALLER
-      # errors — a seller mistyped a password, or Convex sent a malformed
-      # key. Paging on those would make this alert ignored within a week.
+      # invalid_credentials / bad_key_format / missing_key / reauth_required
+      # are all CALLER-SIDE state — a seller mistyped a password, Convex sent
+      # a malformed key, or (NEO-278, 2026-09-14) there is no live session and
+      # no password on file to mint one (NEO-141's 422 reauth_required). None
+      # of these are the marketplace or our service being broken, and paging
+      # on any of them would make this alert ignored within a week — NEO-278
+      # was the whole exclusion list firing on every 5m window for a day
+      # because every call was reauth_required while syncs kept succeeding.
       # Everything else — timeout, challenge, oom, other, and the empty
       # string the service yields when it cannot classify — is a genuine
       # "the marketplace or our service is broken" signal.
@@ -2501,6 +2537,7 @@ resource "google_monitoring_alert_policy" "browser_login_failures" {
         "metric.label.error_class!=\"invalid_credentials\"",
         "metric.label.error_class!=\"bad_key_format\"",
         "metric.label.error_class!=\"missing_key\"",
+        "metric.label.error_class!=\"reauth_required\"",
       ])
 
       comparison      = "COMPARISON_GT"
@@ -2535,6 +2572,74 @@ resource "google_monitoring_alert_policy" "browser_login_failures" {
   }
 
   user_labels = merge(var.common_labels, { ticket = "neo-43" })
+
+  depends_on = [google_project_iam_member.tf_deployer_monitoring_alert_editor]
+}
+
+# NEO-278: reauth_required is caller-side state (no live session, no password
+# to mint one — NEO-141) and is excluded from the failures policy above so a
+# normal lapsed session never pages. But a normal lapse and a runaway retry
+# loop hitting reauth_required over and over look identical to that
+# exclusion — both are just "excluded from the count". This policy is the
+# separate, high-threshold signal for the second case: it stays quiet for any
+# plausible number of sellers re-authing in a day and only fires on sustained
+# volume, which is what actually happened on 2026-09-14 (every call, both
+# platforms, every 5m window, all day).
+resource "google_monitoring_alert_policy" "browser_reauth_required_volume" {
+  count        = var.enable_browser_login_alerts ? 1 : 0
+  project      = var.gcp_project_id
+  display_name = "browser-service: reauth required volume (NEO-278)"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "50+ reauth_required login calls in 30m (per platform)"
+
+    condition_threshold {
+      filter = join(" AND ", [
+        # Interpolated so Terraform creates the metric first — see the note
+        # on the failures policy above.
+        "metric.type=\"logging.googleapis.com/user/${google_logging_metric.browser_login_failures[0].name}\"",
+        "resource.type=\"cloud_run_revision\"",
+        "metric.label.error_class=\"reauth_required\"",
+      ])
+
+      comparison = "COMPARISON_GT"
+      # 50 in 30m is a runaway-retry threshold, not a "someone's session
+      # lapsed" threshold — a single seller reauthing is 1, not 50. Set high
+      # deliberately so this stays silent for any plausible day of normal
+      # lapsed sessions and only fires on the kind of loop that produced the
+      # NEO-278 incident.
+      threshold_value = 50
+      duration        = "0s"
+
+      aggregations {
+        # 30m (vs 5m on the failures policy) because this is a volume/trend
+        # signal, not an incident signal — matches the latency policy's
+        # reasoning for using a longer window.
+        alignment_period     = "1800s"
+        per_series_aligner   = "ALIGN_DELTA"
+        cross_series_reducer = "REDUCE_SUM"
+        group_by_fields      = ["metric.label.platform"]
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+
+  notification_channels = [google_monitoring_notification_channel.ops_email[0].id]
+
+  alert_strategy {
+    auto_close = "1800s"
+  }
+
+  documentation {
+    mime_type = "text/markdown"
+    content   = local.neo43_doc_reauth_required
+  }
+
+  user_labels = merge(var.common_labels, { ticket = "neo-278" })
 
   depends_on = [google_project_iam_member.tf_deployer_monitoring_alert_editor]
 }
