@@ -2098,7 +2098,11 @@ resource "google_logging_metric" "browser_login_failures" {
     labels {
       key         = "error_class"
       value_type  = "STRING"
-      description = "bad_key_format | timeout | invalid_credentials | challenge | oom | other | missing_key | reauth_required; empty when the service could not classify"
+      # NEO-278: reauth_required is also a value here, but the description is left
+      # as first written — a label-descriptor edit forces the metric to be
+      # destroyed and recreated, losing its history and briefly orphaning every
+      # policy that reads it. Documentation lives in the policies instead.
+      description = "bad_key_format | timeout | invalid_credentials | challenge | oom | other | missing_key; empty when the service could not classify"
     }
     labels {
       key         = "challenge_detected"
