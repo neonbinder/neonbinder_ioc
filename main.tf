@@ -2330,10 +2330,16 @@ locals {
     - Marketplace-side outage: nothing to deploy. Note it on the ticket.
     - Our regression: `gcloud run services update-traffic ${var.cloud_run_service_name}
       --region=${var.gcp_region} --project=${var.gcp_project_id} --to-revisions=<previous>=100`
-    - Pause the canary: set `login_canary_paused = true` in
-      environments/prod.tfvars and merge. Break-glass is
-      `gcloud scheduler jobs pause` — but the NEXT APPLY REVERTS IT, so always
-      follow up with the tfvars change.
+    - Pause ONE platform (the common case — e.g. a SportLots-only outage):
+      set `login_canary_paused_platforms = ["sportlots"]` (or `["bsc"]`) in
+      environments/prod.tfvars and merge. The OTHER platform's canary and its
+      absence (hang) detector keep running unaffected.
+    - Pause BOTH platforms: set `login_canary_paused = true` in
+      environments/prod.tfvars and merge — this also tears down the absence
+      policy entirely so it can't page you an hour later for a canary you
+      paused on purpose.
+    - Either way, break-glass is `gcloud scheduler jobs pause` — but the NEXT
+      APPLY REVERTS IT, so always follow up with the tfvars change.
     - Silence this alert: `enable_browser_login_alerts` in prod.tfvars. Never
       by editing in the console — the next apply reverts console edits.
   EOT
@@ -2767,12 +2773,18 @@ resource "google_monitoring_alert_policy" "browser_login_latency" {
 # guarantees a heartbeat. Without a synthetic probe, "no login logs" is
 # indistinguishable from "no sellers logged in today".
 resource "google_monitoring_alert_policy" "browser_login_canary_absent" {
-  # Gated on the canary being ENABLED AND NOT PAUSED. A paused canary emits
-  # nothing by design, so creating this policy alongside a paused canary would
-  # guarantee a false alarm one window later — the monitoring causing the
-  # incident. It also means the documented "pause the canary" incident
-  # response does not itself page you an hour afterwards.
-  count        = var.enable_browser_login_alerts && var.enable_login_canary && !var.login_canary_paused ? 1 : 0
+  # Gated on the canary being ENABLED AND NOT *entirely* PAUSED. A paused
+  # canary emits nothing by design, so creating this policy while EVERY
+  # platform is paused would guarantee a false alarm one window later — the
+  # monitoring causing the incident. It also means the documented "pause the
+  # canary" incident response does not itself page you an hour afterwards.
+  #
+  # NEO-287: this is deliberately "both paused", not "either paused" — a
+  # SINGLE-platform pause (e.g. SportLots alone, via
+  # login_canary_paused_platforms) keeps this policy alive so BSC's hang
+  # detection stays meaningful; the filter below is what keeps the paused
+  # platform's now-silent series from paging on its own.
+  count        = var.enable_browser_login_alerts && var.enable_login_canary && !local.login_canary_both_paused ? 1 : 0
   project      = var.gcp_project_id
   display_name = "browser-service: login canary stopped reporting (NEO-43)"
   combiner     = "OR"
@@ -2781,15 +2793,26 @@ resource "google_monitoring_alert_policy" "browser_login_canary_absent" {
     display_name = "No canary login completed within the absence window"
 
     condition_absent {
-      filter = join(" AND ", [
-        # Interpolated so Terraform creates the metric first — see the note on
-        # the failures policy above. Doubly important here: an absence policy
-        # pointed at a non-existent metric type sees permanent absence, so the
-        # ordering bug would not fail quietly — it would page immediately.
-        "metric.type=\"logging.googleapis.com/user/${google_logging_metric.browser_login_duration_ms[0].name}\"",
-        "resource.type=\"cloud_run_revision\"",
-        "metric.label.canary=\"true\"",
-      ])
+      filter = join(" AND ", concat(
+        [
+          # Interpolated so Terraform creates the metric first — see the note
+          # on the failures policy above. Doubly important here: an absence
+          # policy pointed at a non-existent metric type sees permanent
+          # absence, so the ordering bug would not fail quietly — it would
+          # page immediately.
+          "metric.type=\"logging.googleapis.com/user/${google_logging_metric.browser_login_duration_ms[0].name}\"",
+          "resource.type=\"cloud_run_revision\"",
+          "metric.label.canary=\"true\"",
+        ],
+        # NEO-287: exclude a platform's series from absence detection while
+        # ITS OWN canary is paused — a paused platform stops logging by
+        # design, so leaving it in this filter would be a guaranteed false
+        # alarm one absence window later, exactly the failure mode the
+        # policy-level `count` gate above already prevents for "both paused".
+        # The platform that is still running keeps being checked normally.
+        local.login_canary_paused_bsc ? ["metric.label.platform!=\"bsc\""] : [],
+        local.login_canary_paused_sportlots ? ["metric.label.platform!=\"sportlots\""] : [],
+      ))
 
       # Must be ≳3x the canary interval, or normal jitter pages you. See the
       # variable's description — this has to be retightened in the same PR
@@ -2875,6 +2898,21 @@ resource "google_monitoring_alert_policy" "browser_login_canary_absent" {
 # Canary failures produce ordinary browser_login_call lines and Cloud Run
 # request metrics, so they feed the policies above with no extra wiring; the
 # `canary` metric label is what lets those policies tell synthetic from real.
+
+# NEO-287: per-platform effective pause, ORing the "pause everything" flag
+# with the per-platform set so both mechanisms keep working (login_canary_paused
+# remains the one-line pause-both lever the runbook documents; a single
+# marketplace outage sets login_canary_paused_platforms instead). Read by both
+# scheduler jobs below and by the absence policy above.
+locals {
+  login_canary_paused_bsc       = var.login_canary_paused || contains(var.login_canary_paused_platforms, "bsc")
+  login_canary_paused_sportlots = var.login_canary_paused || contains(var.login_canary_paused_platforms, "sportlots")
+  # Both effectively paused ⇒ same as the old `login_canary_paused = true`
+  # case: the absence policy above is torn down entirely rather than kept
+  # alive with a filter that matches nothing (which would itself be a
+  # guaranteed absence alarm).
+  login_canary_both_paused = local.login_canary_paused_bsc && local.login_canary_paused_sportlots
+}
 
 resource "google_service_account" "login_canary" {
   count        = var.enable_login_canary ? 1 : 0
@@ -2985,7 +3023,10 @@ resource "google_cloud_scheduler_job" "login_canary_bsc" {
   schedule         = var.login_canary_schedule_bsc
   time_zone        = "Etc/UTC"
   attempt_deadline = var.login_canary_attempt_deadline
-  paused           = var.login_canary_paused
+  # NEO-287: per-platform pause (ORs with the pause-everything flag) rather
+  # than the shared var.login_canary_paused directly — see the locals block
+  # above the service-account resource.
+  paused = local.login_canary_paused_bsc
 
   retry_config {
     retry_count = 0
@@ -3029,7 +3070,12 @@ resource "google_cloud_scheduler_job" "login_canary_sportlots" {
   schedule         = var.login_canary_schedule_sportlots
   time_zone        = "Etc/UTC"
   attempt_deadline = var.login_canary_attempt_deadline
-  paused           = var.login_canary_paused
+  # NEO-287: per-platform pause — see the locals block above the
+  # service-account resource. This is the switch the SportLots outage
+  # runbook flips: environments/prod.tfvars sets
+  # login_canary_paused_platforms = ["sportlots"] to stop just this job
+  # while BSC keeps heartbeating and its own hang detector stays live.
+  paused = local.login_canary_paused_sportlots
 
   retry_config {
     retry_count = 0
