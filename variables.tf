@@ -421,9 +421,27 @@ variable "enable_login_canary" {
 # `gcloud scheduler jobs pause` — but note the NEXT APPLY REVERTS IT, so a
 # pause must always be followed by this flag.
 variable "login_canary_paused" {
-  description = "Pause the NEO-43 login canary jobs without destroying them. Set true to stop the synthetic logins immediately — e.g. while debugging a marketplace-side outage, or when the canary itself is generating noise during an incident, so its failures don't drown the real signal."
+  description = "Pause BOTH NEO-43 login canary jobs without destroying them. Set true to stop every synthetic login immediately — e.g. while debugging a marketplace-side outage that affects both platforms, or when the canary itself is generating noise during an incident, so its failures don't drown the real signal. For a SINGLE marketplace outage (e.g. SportLots alone is down), prefer login_canary_paused_platforms instead — pausing both jobs here would also blind the absence (hung-service) detector for the platform that is still healthy, for no reason. The two ARE both still respected: this flag ORs into the per-platform pause below, so it remains the one-line \"stop everything\" lever the NEO-43 runbook documents."
   type        = bool
   default     = false
+}
+
+# NEO-287: per-platform companion to login_canary_paused. Added because
+# SportLots-only outages (the common case so far) previously forced an
+# operator to choose between "page me about a healthy BSC hang too" (leave
+# both canaries running while SL 500s on schedule) and "go blind on BSC"
+# (login_canary_paused = true stops both jobs AND tears down the absence
+# policy entirely, per its `count` gate below). Neither was right when only
+# one marketplace is actually down.
+variable "login_canary_paused_platforms" {
+  description = "Per-platform pause for the NEO-43 login canary. Each entry (\"bsc\", \"sportlots\") pauses only that platform's Cloud Scheduler job and excludes it from the absence (hung-service) detector's filter, so the OTHER platform's hang detection stays live and meaningful instead of the whole policy being torn down. ORs with login_canary_paused (which still pauses both). Empty set = nothing paused via this mechanism."
+  type        = set(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for p in var.login_canary_paused_platforms : contains(["bsc", "sportlots"], p)])
+    error_message = "Entries of login_canary_paused_platforms must be \"bsc\" and/or \"sportlots\", the only two NEO-43 canary platforms."
+  }
 }
 
 # Every 30 minutes per platform, staggered 15 minutes apart. With ~65 min
@@ -454,7 +472,7 @@ variable "login_canary_schedule_sportlots" {
 # tightened to every 30 minutes, tighten this to 5400s (90m) IN THE SAME PR —
 # they are one setting expressed in two places.
 variable "login_canary_absence_duration" {
-  description = "How long the NEO-43 canary may go silent before the absence policy fires. This is the alert that catches a HUNG service — a hung login writes no log line, so silence is the only symptom — but it is meaningless unless the canary is actually running, which is why the policy is also gated on login_canary_paused being false. Keep at roughly 3x the canary interval; 5400s = 3 missed runs at the 30-minute cadence."
+  description = "How long the NEO-43 canary may go silent before the absence policy fires. This is the alert that catches a HUNG service — a hung login writes no log line, so silence is the only symptom — but it is meaningless for a platform whose canary isn't actually running, which is why the policy (a) is skipped entirely when both platforms are paused and (b) excludes a single paused platform's series from the filter otherwise (NEO-287, see login_canary_paused / login_canary_paused_platforms). Keep at roughly 3x the canary interval; 5400s = 3 missed runs at the 30-minute cadence."
   type        = string
   default     = "5400s"
 }
