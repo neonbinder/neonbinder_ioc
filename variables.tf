@@ -440,7 +440,7 @@ variable "login_canary_paused_platforms" {
 
   validation {
     condition     = alltrue([for p in var.login_canary_paused_platforms : contains(["bsc", "sportlots"], p)])
-    error_message = "login_canary_paused_platforms entries must be \"bsc\" and/or \"sportlots\" — the only two NEO-43 canary platforms."
+    error_message = "Entries of login_canary_paused_platforms must be \"bsc\" and/or \"sportlots\", the only two NEO-43 canary platforms."
   }
 }
 
