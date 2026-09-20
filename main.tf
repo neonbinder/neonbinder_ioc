@@ -1370,6 +1370,31 @@ resource "google_secret_manager_secret_iam_member" "preprocess_runtime_anthropic
   member    = "serviceAccount:${google_service_account.preprocess_runtime.email}"
 }
 
+# SportLots owner-issued "Automated Access" credential (NEO-288, 2026-09-19).
+# The browser service POSTs this to /u/node/automated-access before every
+# fresh SportLots sign-in. Secret shell only — same pattern as anthropic_api_key
+# above. The VALUE is seeded out-of-band and never touches tfvars/state:
+#
+#   gcloud secrets versions add sportlots-automated-access \
+#     --data-file=<0600 file> --project=neonbinder{-dev}
+#
+# Payload is JSON: {"keyId": "...", "secret": "..."}. Rotation = add a new
+# version; the browser service re-reads within its cache TTL.
+#
+# No IAM binding needed: the browser runtime SA already holds project-wide
+# roles/secretmanager.admin (see runtime_secret_admin / runtime_secretmanager_admin
+# above), which covers secretAccessor on every secret in the project, including
+# this one, in both neonbinder-dev and neonbinder.
+resource "google_secret_manager_secret" "sportlots_automated_access" {
+  secret_id = "sportlots-automated-access"
+
+  replication {
+    auto {}
+  }
+
+  labels = var.common_labels
+}
+
 # ──────────────────────────────────────────────
 # Preprocess FAST runtime SA (NEO-175, security control #2) — dedicated, not
 # shared with heavy's preprocess_runtime. Least-privilege reasons this is its
