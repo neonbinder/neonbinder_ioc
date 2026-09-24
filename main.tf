@@ -1472,6 +1472,27 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
   name     = var.preprocess_service_name
   location = var.gcp_region
 
+  # NEO-299: SERVICE-level max instances, now terraform-owned. Before this,
+  # a manual `gcloud run deploy` on 2026-04-16 hand-set
+  # run.googleapis.com/maxScale=5 here, out of band, and every deploy since
+  # carried it forward untouched by any repo. That value — not the template's
+  # maxScale below — was the effective cap, because Cloud Run's effective
+  # limit is min(service-level, revision-level): a tagged, no-traffic preview
+  # revision ignores the service-level annotation entirely and scales to its
+  # OWN template maxScale, which is how a PR preview burst blew past dev's
+  # memory quota (see heavy_preprocess_max_instances's comment). Setting the
+  # same var at both levels keeps them equal and keeps terraform in sole
+  # control of the effective cap when traffic is on the named revision.
+  #
+  # See docs/runbooks/preprocess-capacity.md for how to read the effective
+  # cap and the three-layer picture (service annotation, revision template,
+  # Convex pool).
+  metadata {
+    annotations = {
+      "run.googleapis.com/maxScale" = tostring(var.heavy_preprocess_max_instances)
+    }
+  }
+
   template {
     metadata {
       annotations = {
@@ -1485,8 +1506,11 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
 
     spec {
       container_concurrency = var.preprocess_container_concurrency
-      timeout_seconds       = 300
-      service_account_name  = google_service_account.preprocess_runtime.email
+      # NEO-299: 300 -> 420. The client-side escalation wait is 400s and a
+      # cold heavy call (model load + inference) measures ~315s; 300s left
+      # Cloud Run cutting the request before the client itself gave up.
+      timeout_seconds      = 420
+      service_account_name = google_service_account.preprocess_runtime.email
 
       containers {
         image = var.preprocess_image
@@ -1595,6 +1619,19 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
       # Knative auto-sets a per-revision nonce label; terraform doesn't
       # manage any labels on this template, so ignore the whole map.
       template[0].metadata[0].labels,
+      # NEO-299: the SERVICE-level metadata block above is new — it declares
+      # only run.googleapis.com/maxScale, so a real `terraform plan` against
+      # dev showed it wanting to remove three more keys gcloud/Cloud Run set
+      # server-side on every deploy and read: client-name, client-version
+      # (mirroring the template-level pair above, at the service level this
+      # time) and `urls` (the service's own run.app URLs, computed output,
+      # never something terraform assigns). Ignoring only these three named
+      # keys — not the whole annotations map — keeps terraform in sole
+      # control of maxScale while not fighting Cloud Run over values it sets
+      # itself.
+      metadata[0].annotations["run.googleapis.com/client-name"],
+      metadata[0].annotations["run.googleapis.com/client-version"],
+      metadata[0].annotations["run.googleapis.com/urls"],
     ]
   }
 }
@@ -1668,6 +1705,16 @@ resource "google_cloud_run_service" "neonbinder_preprocess_fast" {
 
   name     = var.preprocess_fast_service_name
   location = var.gcp_region
+
+  # NEO-299: SERVICE-level max instances, terraform-owned — mirrors
+  # neonbinder_preprocess's top-level metadata block above (see its comment
+  # for why the service-level annotation, not just the template's, is the
+  # one that matters when a no-traffic tagged revision isn't in play).
+  metadata {
+    annotations = {
+      "run.googleapis.com/maxScale" = tostring(var.preprocess_max_instances)
+    }
+  }
 
   template {
     metadata {
@@ -1761,13 +1808,18 @@ resource "google_cloud_run_service" "neonbinder_preprocess_fast" {
 
   lifecycle {
     # Mirrors neonbinder_preprocess's lifecycle block above — same deploy-
-    # workflow-owns-traffic / gcloud-annotation-churn rationale.
+    # workflow-owns-traffic / gcloud-annotation-churn rationale, including
+    # the NEO-299 service-level metadata additions (see that block's comment
+    # for why exactly these three keys and not the whole map).
     ignore_changes = [
       template[0].spec[0].containers[0].image,
       traffic,
       template[0].metadata[0].annotations["run.googleapis.com/client-name"],
       template[0].metadata[0].annotations["run.googleapis.com/client-version"],
       template[0].metadata[0].labels,
+      metadata[0].annotations["run.googleapis.com/client-name"],
+      metadata[0].annotations["run.googleapis.com/client-version"],
+      metadata[0].annotations["run.googleapis.com/urls"],
     ]
   }
 }
@@ -2121,8 +2173,8 @@ resource "google_logging_metric" "browser_login_failures" {
       description = "bsc | sportlots"
     }
     labels {
-      key         = "error_class"
-      value_type  = "STRING"
+      key        = "error_class"
+      value_type = "STRING"
       # NEO-278: reauth_required is also a value here, but the description is left
       # as first written — a label-descriptor edit forces the metric to be
       # destroyed and recreated, losing its history and briefly orphaning every

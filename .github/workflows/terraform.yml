@@ -54,6 +54,65 @@ jobs:
       - name: Terraform Validate
         run: terraform validate
 
+      # NEO-299: the single source of truth for heavy/fast preprocess
+      # capacity is the monorepo's apps/web/convex/preprocessCapacity.json
+      # (public repo, fetched unauthenticated). This fails plan AND apply on
+      # a real mismatch between that file and this env's tfvars, so the three
+      # numbers (terraform, the live Cloud Run service, Convex) can never
+      # silently drift apart again the way NEO-299 found them.
+      #
+      # 404 tolerance: this terraform PR's own `develop` merge (which applies
+      # to dev on push) can land BEFORE the companion monorepo PR that adds
+      # preprocessCapacity.json merges to its main. A hard failure on 404
+      # would deadlock that ordering — this terraform change could never
+      # apply until a monorepo PR merges, and that monorepo PR has no reason
+      # to depend on this one. So a 404 is a warning, not a failure, on
+      # EITHER path (plan or apply); only an actual value mismatch once the
+      # file exists fails the run. Once the monorepo PR merges, the very next
+      # terraform run on either branch starts enforcing parity for real.
+      - name: Preprocess capacity parity check
+        run: |
+          set -euo pipefail
+          URL="https://raw.githubusercontent.com/neonbinder/neonbinder/main/apps/web/convex/preprocessCapacity.json"
+          HTTP_CODE=$(curl -sS -o capacity.json -w "%{http_code}" "$URL")
+
+          if [ "$HTTP_CODE" = "404" ]; then
+            echo "::warning::preprocessCapacity.json not found on neonbinder/neonbinder@main (404) — skipping the heavy/fast capacity parity check. Expected only until the companion NEO-299 monorepo PR merges; if this warning persists past that, something is wrong."
+            exit 0
+          fi
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Unexpected HTTP $HTTP_CODE fetching $URL"
+            exit 1
+          fi
+
+          EXPECTED_HEAVY=$(jq -r ".heavy.${ENV_NAME}" capacity.json)
+          EXPECTED_FAST=$(jq -r ".fast.${ENV_NAME}" capacity.json)
+
+          if [ "$EXPECTED_HEAVY" = "null" ] || [ "$EXPECTED_FAST" = "null" ]; then
+            echo "::error::preprocessCapacity.json has no heavy.${ENV_NAME} or fast.${ENV_NAME} entry"
+            exit 1
+          fi
+
+          ACTUAL_HEAVY=$(grep -E '^heavy_preprocess_max_instances[[:space:]]*=' "${TF_VAR_FILE}" | grep -oE '[0-9]+' | head -1)
+          ACTUAL_FAST=$(grep -E '^preprocess_max_instances[[:space:]]*=' "${TF_VAR_FILE}" | grep -oE '[0-9]+' | head -1)
+
+          FAIL=0
+          if [ "$ACTUAL_HEAVY" != "$EXPECTED_HEAVY" ]; then
+            echo "::error::${TF_VAR_FILE} heavy_preprocess_max_instances=$ACTUAL_HEAVY but preprocessCapacity.json heavy.${ENV_NAME}=$EXPECTED_HEAVY"
+            FAIL=1
+          fi
+          if [ "$ACTUAL_FAST" != "$EXPECTED_FAST" ]; then
+            echo "::error::${TF_VAR_FILE} preprocess_max_instances=$ACTUAL_FAST but preprocessCapacity.json fast.${ENV_NAME}=$EXPECTED_FAST"
+            FAIL=1
+          fi
+          if [ "$FAIL" = "1" ]; then
+            exit 1
+          fi
+          echo "Parity OK for ${ENV_NAME}: heavy=$ACTUAL_HEAVY fast=$ACTUAL_FAST"
+        env:
+          ENV_NAME: ${{ env.ENV_NAME }}
+          TF_VAR_FILE: ${{ env.TF_VAR_FILE }}
+
       - name: Terraform Plan
         id: plan
         run: terraform plan -var-file="${{ env.TF_VAR_FILE }}" -no-color -out=tfplan 2>&1 | tee tfplan.txt
