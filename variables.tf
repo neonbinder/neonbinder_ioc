@@ -189,13 +189,36 @@ variable "preprocess_max_instances" {
   # themselves — fast runs container_concurrency = 8 (see
   # preprocess_fast_container_concurrency below), so each instance serves up
   # to 8 requests at once. The Convex/terraform pairing invariant is still
-  # exact equality by contract (apps/web/convex/preprocessCapacity.ts's own
-  # comment), just conservative in the fast case: it pins dispatch parallelism
-  # to instance count only, leaving each instance's extra concurrency headroom
-  # as unused margin rather than additional throughput. Raising this further
-  # is cheap (maxScale is ~$0 idle) and a reasonable NEO-174-style follow-up,
-  # deliberately not bundled into this security-focused change.
-  description = "Max Cloud Run instances for the preprocess FAST service (neonbinder-preprocess-fast). MUST equal the Convex PREPROCESS_MAX_PARALLELISM env var in the same environment."
+  # exact equality by contract, just conservative in the fast case: it pins
+  # dispatch parallelism to instance count only, leaving each instance's
+  # extra concurrency headroom as unused margin rather than additional
+  # throughput.
+  #
+  # NEO-299: the contract this MUST equal is no longer a Convex env var read
+  # in isolation — the single source of truth for both this value and
+  # `heavy_preprocess_max_instances` is the monorepo's
+  # `apps/web/convex/preprocessCapacity.json` (`fast.<env>` / `heavy.<env>`),
+  # which also carries the `preview` figure PR previews are capped at.
+  # `.github/workflows/terraform.yml` fetches that file on every plan/apply
+  # and fails the run if this var and dev/prod.tfvars's value disagree with
+  # it for the environment being planned — see that workflow's parity step
+  # for the exact comparison and its 404-tolerance behavior. Convex's own
+  # `HEAVY_PREPROCESS_MAX_PARALLELISM`/`PREPROCESS_MAX_PARALLELISM` env vars
+  # are set from the same JSON file, not hand-typed, so all three layers
+  # (terraform, the live Cloud Run service, Convex) trace to one number.
+  #
+  # dev/prod.tfvars now set this explicitly (dev 3, prod 20) rather than
+  # relying on this default; the default only governs a third, not-yet-
+  # existing environment.
+  #
+  # Quota arithmetic (400 GiB / 200 vCPU per region, prod and dev, GCP
+  # defaults), fully warm, using each project's live browser-service memory
+  # (prod 2Gi, dev 4Gi — `gcloud run services describe neonbinder-browser`):
+  #   prod: heavy 12x16 + fast 20x8 + browser 20x2 = 192 + 160 + 40 = 392 GiB
+  #   dev:  heavy 6x16  + fast 3x8  + browser 20x4 = 96  + 24  + 80 = 200 GiB
+  # A PR preview preprocess deploy adds ~78 GiB against dev's budget; two
+  # concurrent previews (356 GiB) still fit, three would not.
+  description = "Max Cloud Run instances for the preprocess FAST service (neonbinder-preprocess-fast). MUST equal apps/web/convex/preprocessCapacity.json's fast.<env> value (and therefore Convex's PREPROCESS_MAX_PARALLELISM) in the same environment — parity-checked in terraform.yml."
   type        = number
   default     = 20
 }
@@ -203,22 +226,29 @@ variable "preprocess_max_instances" {
 variable "heavy_preprocess_max_instances" {
   # NEO-175 Phase 3: split out of the old (pre-split) `preprocess_max_instances`
   # so the heavy service's escalation-only ceiling can be tuned independently
-  # of the fast service's every-image ceiling. Default kept at 20 — heavy's
-  # PRE-split value — deliberately unchanged rather than lowered to reflect
-  # "heavy now serves only a minority of images (escalations)": that is a real
-  # capacity/cost tuning opportunity, but bundling a capacity cut into a
-  # security lock-down PR (NEO-175's allUsers removal, see the heavy Cloud Run
-  # IAM resources) would make a plan diff harder to review and a regression
-  # harder to attribute. Revisit downward once real escalation-rate telemetry
-  # exists (see apps/web/convex/placeholderHeavyPool.ts).
+  # of the fast service's every-image ceiling.
   #
-  # At container_concurrency = 1 (same reasoning as the pre-split value:
-  # BiRefNet's per-request peak allocation means requests cannot stack on one
-  # instance), so instances ARE this service's total concurrent capacity —
-  # same exact-equality contract as before, now against Convex's
-  # HEAVY_PREPROCESS_MAX_PARALLELISM (apps/web/convex/preprocessCapacity.ts)
-  # instead of the unqualified PREPROCESS_MAX_PARALLELISM.
-  description = "Max Cloud Run instances for the preprocess HEAVY service (neonbinder-preprocess, the full BiRefNet cascade). MUST equal the Convex HEAVY_PREPROCESS_MAX_PARALLELISM env var in the same environment."
+  # At container_concurrency = 1, instances ARE this service's total
+  # concurrent capacity (BiRefNet's per-request peak allocation means
+  # requests cannot stack on one instance).
+  #
+  # NEO-299: raised to the single decided number per environment (12 prod,
+  # 6 dev) — see dev/prod.tfvars, which now set this explicitly rather than
+  # relying on the default below. Before this, the terraform default, a
+  # hand-set service-level `run.googleapis.com/maxScale` annotation (never
+  # captured in any repo), and Convex's own fallback could each name a
+  # different number, and a tagged no-traffic revision ignores the
+  # service-level annotation entirely — see this file's top-level
+  # `metadata.annotations` block on `google_cloud_run_service.
+  # neonbinder_preprocess` for the fix to the service-level half, and
+  # docs/runbooks/preprocess-capacity.md for the full three-layer picture.
+  #
+  # The contract this MUST equal is the monorepo's single source of truth,
+  # `apps/web/convex/preprocessCapacity.json` (`heavy.<env>`), not a Convex
+  # env var read in isolation — see `preprocess_max_instances`'s comment
+  # above for the parity-check and quota-arithmetic detail, which applies
+  # identically here.
+  description = "Max Cloud Run instances for the preprocess HEAVY service (neonbinder-preprocess, the full BiRefNet cascade). MUST equal apps/web/convex/preprocessCapacity.json's heavy.<env> value (and therefore Convex's HEAVY_PREPROCESS_MAX_PARALLELISM) in the same environment — parity-checked in terraform.yml."
   type        = number
   default     = 20
 }
