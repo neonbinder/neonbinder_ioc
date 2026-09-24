@@ -1472,17 +1472,17 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
   name     = var.preprocess_service_name
   location = var.gcp_region
 
-  # NEO-299: SERVICE-level max instances, now terraform-owned. Before this,
-  # a manual `gcloud run deploy` on 2026-04-16 hand-set
-  # run.googleapis.com/maxScale=5 here, out of band, and every deploy since
-  # carried it forward untouched by any repo. That value — not the template's
-  # maxScale below — was the effective cap, because Cloud Run's effective
-  # limit is min(service-level, revision-level): a tagged, no-traffic preview
-  # revision ignores the service-level annotation entirely and scales to its
-  # OWN template maxScale, which is how a PR preview burst blew past dev's
-  # memory quota (see heavy_preprocess_max_instances's comment). Setting the
-  # same var at both levels keeps them equal and keeps terraform in sole
-  # control of the effective cap when traffic is on the named revision.
+  # NEO-299: SERVICE-level max instances, now terraform-owned. Before this a
+  # manual `gcloud run deploy` had hand-set `run.googleapis.com/maxScale`
+  # here, out of band, and every deploy since carried it forward untouched by
+  # any repo. That value — not the template's maxScale below — was the
+  # effective cap, because Cloud Run's effective limit is
+  # min(service-level, revision-level): a tagged, no-traffic preview revision
+  # ignores the service-level annotation entirely and scales to its OWN
+  # template maxScale instead (see heavy_preprocess_max_instances's comment
+  # for why that distinction matters). Setting the same var at both levels
+  # keeps them equal and keeps terraform in sole control of the effective cap
+  # when traffic is on the named revision.
   #
   # See docs/runbooks/preprocess-capacity.md for how to read the effective
   # cap and the three-layer picture (service annotation, revision template,

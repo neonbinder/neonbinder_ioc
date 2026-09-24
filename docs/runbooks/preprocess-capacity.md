@@ -1,9 +1,8 @@
 # Preprocess capacity: three layers, one number
 
 NEO-299. Heavy and fast preprocess capacity is expressed in three places.
-They must always agree; disagreement is what NEO-299 fixed (see that ticket
-for the incident). This is how to read the effective cap and where each
-layer is set.
+They must always agree; disagreement is what NEO-299 fixed. This is how to
+read the effective cap and where each layer is set.
 
 ## The three layers
 
@@ -26,21 +25,27 @@ All three trace to one file: the monorepo's
 `apps/web/convex/preprocessCapacity.json` (`{heavy,fast}.{prod,dev,preview}`).
 Terraform's `heavy_preprocess_max_instances` / `preprocess_max_instances` in
 `environments/{dev,prod}.tfvars` are set from it by hand today; the
-`terraform.yml` parity step fails the plan/apply if they drift apart (see
-that workflow's "Preprocess capacity parity check" step for the exact
-comparison and its 404 handling for the case where the JSON file is still
-mid-rollout).
+`terraform.yml` parity step fails the plan/apply if they drift apart.
+
+The parity step checks the **tfvars first, then the JSON**: it reads this
+env's `environments/{dev,prod}.tfvars` value before it ever fetches the
+monorepo file, so a JSON fetch failure never masks a tfvars problem and the
+error message always names the tfvars value it found. See that workflow's
+"Preprocess capacity parity check" step for the exact comparison and its 404
+handling for the case where the JSON file is still mid-rollout — a 404 is a
+warning in dev/develop (the JSON can legitimately not exist yet there) but a
+hard failure in prod, since prod's rollout order guarantees the monorepo
+merge lands first.
 
 ## The failure mode this exists to prevent
 
 **A tagged, no-traffic revision (a PR preview) ignores the service-level
-annotation and scales to its own template's `maxScale`.** That was the root
-cause of the 2026-09 incident: the live services carried a hand-set,
-out-of-repo service-level cap of 5 (set by a manual `gcloud run deploy` in
-April 2026), which held the *serving* revision to 5 — but a PR preview
-revision, never having received traffic, scaled straight to the template's
-then-default of 20, and a burst of heavy + fast preview instances exceeded
-the project's 400 GiB/region Cloud Run memory quota.
+annotation and scales to its own template's `maxScale`.** A hand-set,
+out-of-repo service-level cap can hold the *serving* revision to a low
+number while a PR preview revision, never having received traffic, scales
+straight to the template's (possibly much higher) `maxScale` — a burst of
+heavy + fast preview instances can then exceed the project's 400 GiB/region
+Cloud Run memory quota even though the serving revision looks constrained.
 
 The effective cap for the revision **currently serving traffic** is
 `min(service-level, revision-level)`. The effective cap for a **tagged,

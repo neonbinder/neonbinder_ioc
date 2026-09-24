@@ -212,7 +212,8 @@ variable "preprocess_max_instances" {
   # existing environment.
   #
   # Quota arithmetic (400 GiB / 200 vCPU per region, prod and dev, GCP
-  # defaults), fully warm:
+  # defaults), fully warm, using each project's live browser-service memory
+  # (prod 2Gi, dev 4Gi — `gcloud run services describe neonbinder-browser`):
   #   prod: heavy 12x16 + fast 20x8 + browser 20x2 = 192 + 160 + 40 = 392 GiB
   #   dev:  heavy 6x16  + fast 3x8  + browser 20x4 = 96  + 24  + 80 = 200 GiB
   # A PR preview preprocess deploy adds ~78 GiB against dev's budget; two
@@ -231,18 +232,16 @@ variable "heavy_preprocess_max_instances" {
   # concurrent capacity (BiRefNet's per-request peak allocation means
   # requests cannot stack on one instance).
   #
-  # NEO-299 (2026-09-24): raised to the single decided number, 12 in both
-  # dev and prod — see dev/prod.tfvars, which now set this explicitly rather
-  # than relying on the default below. Before this, THREE different numbers
-  # described heavy capacity (this var's then-default of 20, a hand-set
-  # service-level `run.googleapis.com/maxScale=5` from an April 2026 manual
-  # `gcloud run deploy` that was the actual effective cap and lived in no
-  # repo, and Convex's own default-3 fallback) and a PR preview burst that
-  # ignored the out-of-band service-level cap blew past dev's Cloud Run
-  # memory quota. See this file's top-level `metadata.annotations` block on
-  # `google_cloud_run_service.neonbinder_preprocess` for the fix to the
-  # service-level half, and docs/runbooks/preprocess-capacity.md for the
-  # full three-layer picture.
+  # NEO-299: raised to the single decided number per environment (12 prod,
+  # 6 dev) — see dev/prod.tfvars, which now set this explicitly rather than
+  # relying on the default below. Before this, the terraform default, a
+  # hand-set service-level `run.googleapis.com/maxScale` annotation (never
+  # captured in any repo), and Convex's own fallback could each name a
+  # different number, and a tagged no-traffic revision ignores the
+  # service-level annotation entirely — see this file's top-level
+  # `metadata.annotations` block on `google_cloud_run_service.
+  # neonbinder_preprocess` for the fix to the service-level half, and
+  # docs/runbooks/preprocess-capacity.md for the full three-layer picture.
   #
   # The contract this MUST equal is the monorepo's single source of truth,
   # `apps/web/convex/preprocessCapacity.json` (`heavy.<env>`), not a Convex

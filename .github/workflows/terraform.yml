@@ -15,6 +15,10 @@ permissions:
 jobs:
   terraform:
     runs-on: ubuntu-latest
+    # NEO-299: no timeout existed before; a stuck plan/apply or a hanging
+    # curl (now bounded to 20s per attempt by --max-time, but retried) should
+    # still not be able to wedge the runner indefinitely.
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -59,25 +63,38 @@ jobs:
       # (public repo, fetched unauthenticated). This fails plan AND apply on
       # a real mismatch between that file and this env's tfvars, so the three
       # numbers (terraform, the live Cloud Run service, Convex) can never
-      # silently drift apart again the way NEO-299 found them.
+      # silently drift apart again.
       #
-      # 404 tolerance: this terraform PR's own `develop` merge (which applies
-      # to dev on push) can land BEFORE the companion monorepo PR that adds
-      # preprocessCapacity.json merges to its main. A hard failure on 404
-      # would deadlock that ordering — this terraform change could never
-      # apply until a monorepo PR merges, and that monorepo PR has no reason
-      # to depend on this one. So a 404 is a warning, not a failure, on
-      # EITHER path (plan or apply); only an actual value mismatch once the
-      # file exists fails the run. Once the monorepo PR merges, the very next
-      # terraform run on either branch starts enforcing parity for real.
+      # Order: this env's tfvars is read FIRST, before the JSON is even
+      # fetched, so a fetch failure never masks a tfvars problem and every
+      # error message can always name the tfvars value it found.
+      #
+      # 404 tolerance is environment-specific. In dev/develop, a 404 is a
+      # warning, not a failure: this terraform PR's own `develop` merge
+      # (which applies to dev on push) can land BEFORE the companion
+      # monorepo PR that adds preprocessCapacity.json merges to its main, and
+      # a hard failure there would deadlock that ordering. In prod, a 404 is
+      # always a real fault and FAILS the run: the rollout order guarantees
+      # the monorepo merge (and therefore the JSON's existence) lands before
+      # any prod apply, so a missing file at that point means something
+      # broke, not that a merge hasn't happened yet.
       - name: Preprocess capacity parity check
         run: |
           set -euo pipefail
+
+          ACTUAL_HEAVY=$(grep -E '^heavy_preprocess_max_instances[[:space:]]*=' "${TF_VAR_FILE}" | grep -oE '[0-9]+' | head -1)
+          ACTUAL_FAST=$(grep -E '^preprocess_max_instances[[:space:]]*=' "${TF_VAR_FILE}" | grep -oE '[0-9]+' | head -1)
+          echo "${TF_VAR_FILE}: heavy_preprocess_max_instances=$ACTUAL_HEAVY preprocess_max_instances=$ACTUAL_FAST"
+
           URL="https://raw.githubusercontent.com/neonbinder/neonbinder/main/apps/web/convex/preprocessCapacity.json"
-          HTTP_CODE=$(curl -sS -o capacity.json -w "%{http_code}" "$URL")
+          HTTP_CODE=$(curl -sS --retry 3 --retry-all-errors --max-time 20 -o capacity.json -w "%{http_code}" "$URL")
 
           if [ "$HTTP_CODE" = "404" ]; then
-            echo "::warning::preprocessCapacity.json not found on neonbinder/neonbinder@main (404) — skipping the heavy/fast capacity parity check. Expected only until the companion NEO-299 monorepo PR merges; if this warning persists past that, something is wrong."
+            if [ "$ENV_NAME" = "prod" ]; then
+              echo "::error::preprocessCapacity.json not found on neonbinder/neonbinder@main (404) while planning/applying PROD. Prod's rollout order requires the monorepo file to exist before any prod apply, so a 404 here is a real fault, not a pending merge."
+              exit 1
+            fi
+            echo "::warning::preprocessCapacity.json not found on neonbinder/neonbinder@main (404) — skipping the heavy/fast capacity parity check for ${ENV_NAME}. Expected only until the companion NEO-299 monorepo PR merges; if this warning persists past that, something is wrong."
             exit 0
           fi
           if [ "$HTTP_CODE" != "200" ]; then
@@ -92,9 +109,6 @@ jobs:
             echo "::error::preprocessCapacity.json has no heavy.${ENV_NAME} or fast.${ENV_NAME} entry"
             exit 1
           fi
-
-          ACTUAL_HEAVY=$(grep -E '^heavy_preprocess_max_instances[[:space:]]*=' "${TF_VAR_FILE}" | grep -oE '[0-9]+' | head -1)
-          ACTUAL_FAST=$(grep -E '^preprocess_max_instances[[:space:]]*=' "${TF_VAR_FILE}" | grep -oE '[0-9]+' | head -1)
 
           FAIL=0
           if [ "$ACTUAL_HEAVY" != "$EXPECTED_HEAVY" ]; then
