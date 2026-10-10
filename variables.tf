@@ -361,6 +361,12 @@ variable "create_preprocess_fixtures_bucket" {
   default     = false
 }
 
+variable "create_reference_seed_bucket" {
+  description = "Whether to create the private reference-seed GCS bucket (dev only, NEO-330). Holds the licence-bound prod-derived reference catalogue bundle that PR Convex previews import before E2E. Public access is prevented. Not needed in prod."
+  type        = bool
+  default     = false
+}
+
 # NEO-148: unlike create_prizes_bucket (prod only), this is set true in BOTH
 # dev.tfvars and prod.tfvars — the placeholder pairing-review feature must be
 # developable in dev, not just live in prod. Default is false (matching

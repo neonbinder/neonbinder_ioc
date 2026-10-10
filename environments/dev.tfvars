@@ -11,6 +11,7 @@ preprocess_max_instances          = 3
 create_prizes_bucket              = false
 create_preprocess_fixtures_bucket = true
 create_placeholder_bucket         = true
+create_reference_seed_bucket      = true
 wif_branch_ref                    = "refs/heads/develop"
 # Dev-only: accept PR OIDC tokens so per-PR browser + preprocess previews can
 # deploy. Keep disabled in prod (default false).
