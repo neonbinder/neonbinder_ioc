@@ -2018,6 +2018,14 @@ resource "google_storage_bucket_iam_member" "reference_seed_developer_admin" {
 
 # PR CI reads the bundle. Explicit bucket-level grant so the read does not
 # depend on the deployer's broader project-wide role.
+#
+# Effective access is wider than this grant: while the project-level
+# `storage.objectAdmin` grants to the browser and preprocess deployers stand
+# (see the NEO-148 note on deployer_storage_object_admin; narrowing is
+# NEO-158), and the tf-deployer holds project-level `storage.admin`, any
+# same-repo PR in either repo can overwrite or delete this bundle — and every
+# PR preview imports it with --replace. Confidentiality is unchanged (repo
+# writers only); integrity relies on versioning above as the recovery path.
 resource "google_storage_bucket_iam_member" "reference_seed_deployer_reader" {
   count  = var.create_reference_seed_bucket ? 1 : 0
   bucket = google_storage_bucket.reference_seed[0].name
