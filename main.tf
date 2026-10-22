@@ -1974,6 +1974,66 @@ resource "google_storage_bucket_iam_member" "preprocess_fixtures_deployer_reader
 }
 
 # ──────────────────────────────────────────────
+# Reference-seed bucket — dev only (NEO-330)
+# ──────────────────────────────────────────────
+# Private home for the prod-derived reference-seed bundle that PR Convex
+# previews import before E2E. The data is licence-bound (share-alike and
+# attribution sources), so it must never be public: public access prevention
+# is enforced. Developers upload; the browser deployer SA (assumed by PR CI
+# through WIF) reads. No prod mirror.
+
+resource "google_storage_bucket" "reference_seed" {
+  count    = var.create_reference_seed_bucket ? 1 : 0
+  name     = "neonbinder-dev-reference-seed"
+  location = var.gcp_region
+
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+
+  versioning {
+    enabled = true
+  }
+
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      # Keep the 3 newest non-current versions; prune older archived ones.
+      with_state         = "ARCHIVED"
+      num_newer_versions = 3
+    }
+  }
+
+  labels = var.common_labels
+}
+
+# Developers upload the bundle. objectAdmin gives read/write/delete.
+resource "google_storage_bucket_iam_member" "reference_seed_developer_admin" {
+  for_each = var.create_reference_seed_bucket ? toset(var.developer_emails) : toset([])
+  bucket   = google_storage_bucket.reference_seed[0].name
+  role     = "roles/storage.objectAdmin"
+  member   = "user:${each.value}"
+}
+
+# PR CI reads the bundle. Explicit bucket-level grant so the read does not
+# depend on the deployer's broader project-wide role.
+#
+# Effective access is wider than this grant: while the project-level
+# `storage.objectAdmin` grants to the browser and preprocess deployers stand
+# (see the NEO-148 note on deployer_storage_object_admin; narrowing is
+# NEO-158), and the tf-deployer holds project-level `storage.admin`, any
+# same-repo PR in either repo can overwrite or delete this bundle — and every
+# PR preview imports it with --replace. Confidentiality is unchanged (repo
+# writers only); integrity relies on versioning above as the recovery path.
+resource "google_storage_bucket_iam_member" "reference_seed_deployer_reader" {
+  count  = var.create_reference_seed_bucket ? 1 : 0
+  bucket = google_storage_bucket.reference_seed[0].name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+# ──────────────────────────────────────────────
 # Billing Budget / Cost Alerts (NEO-95)
 # ──────────────────────────────────────────────
 # There was no billing budget or spend alert at all on the "Neon Binder
@@ -3262,6 +3322,11 @@ output "wif_provider_preprocess_name" {
 output "placeholder_uploads_bucket_name" {
   description = "Name of the placeholder-uploads GCS bucket (NEO-148; set as GCS_PLACEHOLDER_BUCKET Convex env var)"
   value       = var.create_placeholder_bucket ? google_storage_bucket.placeholder_uploads[0].name : ""
+}
+
+output "reference_seed_bucket_name" {
+  description = "Name of the reference-seed GCS bucket (NEO-330); empty when not created"
+  value       = var.create_reference_seed_bucket ? google_storage_bucket.reference_seed[0].name : ""
 }
 
 output "preprocess_fast_runtime_service_account_email" {
