@@ -33,8 +33,8 @@ common_labels = {
 # alarm.
 enable_login_canary = true
 login_canary_paused = false
-# NEO-287 paused the SportLots canary during the 2026-09-17 outage; NEO-288
-# (automated-access handshake, prod-verified 2026-09-21) lifted it. To pause
-# one platform again, list it here (e.g. ["sportlots"]) — BSC's job and its
-# absence detector keep running. See browser_login_canary_absent in main.tf.
-login_canary_paused_platforms = []
+# SportLots is down again (2026-10-20): pause just its canary, as NEO-287 did
+# on 2026-09-17. BSC's job and its absence detector keep running. Unpause by
+# setting this back to [] once SportLots is back and a manual login has been
+# re-verified. See browser_login_canary_absent in main.tf.
+login_canary_paused_platforms = ["sportlots"]
