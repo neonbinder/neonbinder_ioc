@@ -2424,7 +2424,10 @@ locals {
     ```
 
     Fields: `platform`, `operation`, `duration_ms`, `success`, `status_code`,
-    `error_class`, `challenge_detected`, `canary`.
+    `error_class`, `challenge_detected`, `canary`, and `outcome`
+    (`skipped_paused` when the canary was paused by the Convex flag and no
+    sign-in was attempted). Also look for `msg="canary_pause_lookup_failed"`
+    (the flag could not be read, so the canary signed in as usual).
 
     **A HANG EMITS NO LINE AT ALL.** If an alert fired and there is no matching
     entry, that absence IS the finding — go to (2).
@@ -2467,15 +2470,25 @@ locals {
     - Marketplace-side outage: nothing to deploy. Note it on the ticket.
     - Our regression: `gcloud run services update-traffic ${var.cloud_run_service_name}
       --region=${var.gcp_region} --project=${var.gcp_project_id} --to-revisions=<previous>=100`
-    - Pause ONE platform (the common case — e.g. a SportLots-only outage):
-      set `login_canary_paused_platforms = ["sportlots"]` (or `["bsc"]`) in
-      environments/prod.tfvars and merge. The OTHER platform's canary and its
-      absence (hang) detector keep running unaffected.
-    - Pause BOTH platforms: set `login_canary_paused = true` in
-      environments/prod.tfvars and merge — this also tears down the absence
-      policy entirely so it can't page you an hour later for a canary you
-      paused on purpose.
-    - Either way, break-glass is `gcloud scheduler jobs pause` — but the NEXT
+    - Pause ONE platform (the common case, e.g. a SportLots-only outage; NEO-355):
+      `npx convex env set NEONBINDER_PAUSED_PLATFORMS <site key> --prod`
+      (site keys: `buysportscards`, `sportlots`; comma-separate for both).
+      No deploy and no Terraform change: the service reads the flag on each
+      canary run, so it takes effect on the next run. Paused runs skip the
+      sign-in and write a `browser_login_call` line with
+      `outcome="skipped_paused"`; those lines still count as heartbeats for
+      the canary-absent alert, so the hang detector stays live for both
+      platforms. Unpause by removing the platform from the flag. If the flag
+      lookup itself fails the canary signs in as usual and logs
+      `canary_pause_lookup_failed` with a reason.
+    - Pause BOTH platforms at the scheduler: set `login_canary_paused = true`
+      in environments/prod.tfvars and merge. This also tears down the
+      absence policy entirely so it can't page you an hour later for a
+      canary you paused on purpose.
+    - `login_canary_paused_platforms` is superseded by the Convex flag and is
+      break-glass only: it stops that platform's Scheduler job and drops its
+      series from the absence filter (changing it is a Terraform apply).
+    - Last resort is `gcloud scheduler jobs pause` — but the NEXT
       APPLY REVERTS IT, so always follow up with the tfvars change.
     - Silence this alert: `enable_browser_login_alerts` in prod.tfvars. Never
       by editing in the console — the next apply reverts console edits.
@@ -2564,7 +2577,9 @@ locals {
        `resource.type="cloud_scheduler_job"` — an attempt abandoned at the
        180s deadline is recorded here even when the service logs nothing.
     4. Whether anyone paused the canary during an incident and forgot to
-       re-enable it.
+       re-enable it. A canary paused through the Convex flag
+       (NEONBINDER_PAUSED_PLATFORMS) still writes `outcome="skipped_paused"`
+       lines, which count as heartbeats, so this alert does not fire for it.
 
     If this alert names a `revision_name` that is NOT the revision currently
     serving traffic, treat it as a false positive and check the condition's
@@ -3209,9 +3224,9 @@ resource "google_cloud_scheduler_job" "login_canary_sportlots" {
   attempt_deadline = var.login_canary_attempt_deadline
   # NEO-287: per-platform pause — see the locals block above the
   # service-account resource. This is the switch the SportLots outage
-  # runbook flips: environments/prod.tfvars sets
-  # login_canary_paused_platforms = ["sportlots"] to stop just this job
-  # while BSC keeps heartbeating and its own hang detector stays live.
+  # break-glass flips: login_canary_paused_platforms = ["sportlots"] stops
+  # just this job. The routine pause is now the Convex flag
+  # NEONBINDER_PAUSED_PLATFORMS (NEO-355), which needs no apply.
   paused = local.login_canary_paused_sportlots
 
   retry_config {
