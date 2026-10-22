@@ -33,8 +33,8 @@ common_labels = {
 # alarm.
 enable_login_canary = true
 login_canary_paused = false
-# SportLots is down again (2026-10-20): pause just its canary, as NEO-287 did
-# on 2026-09-17. BSC's job and its absence detector keep running. Unpause by
-# setting this back to [] once SportLots is back and a manual login has been
-# re-verified. See browser_login_canary_absent in main.tf.
-login_canary_paused_platforms = ["sportlots"]
+# NEO-355: the routine canary pause is the Convex flag
+# (`npx convex env set NEONBINDER_PAUSED_PLATFORMS <site key> --prod`), which
+# needs no apply and keeps the absence detector fed. This variable stays as
+# break-glass (it stops the Scheduler job); leave it empty.
+login_canary_paused_platforms = []

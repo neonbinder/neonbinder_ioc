@@ -457,7 +457,7 @@ variable "enable_login_canary" {
 # `gcloud scheduler jobs pause` — but note the NEXT APPLY REVERTS IT, so a
 # pause must always be followed by this flag.
 variable "login_canary_paused" {
-  description = "Pause BOTH NEO-43 login canary jobs without destroying them. Set true to stop every synthetic login immediately — e.g. while debugging a marketplace-side outage that affects both platforms, or when the canary itself is generating noise during an incident, so its failures don't drown the real signal. For a SINGLE marketplace outage (e.g. SportLots alone is down), prefer login_canary_paused_platforms instead — pausing both jobs here would also blind the absence (hung-service) detector for the platform that is still healthy, for no reason. The two ARE both still respected: this flag ORs into the per-platform pause below, so it remains the one-line \"stop everything\" lever the NEO-43 runbook documents."
+  description = "Pause BOTH NEO-43 login canary jobs without destroying them. Set true to stop every synthetic login immediately — e.g. while debugging a marketplace-side outage that affects both platforms, or when the canary itself is generating noise during an incident, so its failures don't drown the real signal. For a SINGLE marketplace outage (e.g. SportLots alone is down), prefer the Convex flag NEONBINDER_PAUSED_PLATFORMS (NEO-355), or login_canary_paused_platforms as break-glass, instead — pausing both jobs here would also blind the absence (hung-service) detector for the platform that is still healthy, for no reason. The two ARE both still respected: this flag ORs into the per-platform pause below, so it remains the one-line \"stop everything\" lever the NEO-43 runbook documents."
   type        = bool
   default     = false
 }
@@ -470,7 +470,7 @@ variable "login_canary_paused" {
 # policy entirely, per its `count` gate below). Neither was right when only
 # one marketplace is actually down.
 variable "login_canary_paused_platforms" {
-  description = "Per-platform pause for the NEO-43 login canary. Each entry (\"bsc\", \"sportlots\") pauses only that platform's Cloud Scheduler job and excludes it from the absence (hung-service) detector's filter, so the OTHER platform's hang detection stays live and meaningful instead of the whole policy being torn down. ORs with login_canary_paused (which still pauses both). Empty set = nothing paused via this mechanism."
+  description = "BREAK-GLASS ONLY since NEO-355: the routine per-platform pause is the Convex flag NEONBINDER_PAUSED_PLATFORMS (no apply needed; paused runs log outcome=skipped_paused and still count as heartbeats). Per-platform pause for the NEO-43 login canary. Each entry (\"bsc\", \"sportlots\") pauses only that platform's Cloud Scheduler job and excludes it from the absence (hung-service) detector's filter, so the OTHER platform's hang detection stays live and meaningful instead of the whole policy being torn down. ORs with login_canary_paused (which still pauses both). Empty set = nothing paused via this mechanism."
   type        = set(string)
   default     = []
 
