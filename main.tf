@@ -1395,6 +1395,48 @@ resource "google_secret_manager_secret" "sportlots_automated_access" {
   labels = var.common_labels
 }
 
+# eBay application Cert ID (NEO-415). The browser service reads it as the
+# EBAY_CLIENT_SECRET env var, injected by Cloud Run from this secret
+# (secrets: ebay-client-secret:latest in monorepo browser-deploy.yml and
+# browser.yml) and used by services/browser/src/services/ebay-oauth.ts for the
+# OAuth code exchange and token refresh. The App ID, RuName and environment are
+# not secret and ship as GitHub repo variables. Secret shell only — same
+# pattern as sportlots_automated_access above. The VALUE is seeded out-of-band
+# and never touches tfvars/state:
+#
+#   gcloud secrets versions add ebay-client-secret \
+#     --data-file=<0600 file> --project=neonbinder{-dev}
+#
+# Payload is the eBay Cert ID as a plain string (no JSON, no trailing newline).
+# neonbinder-dev holds the eBay SANDBOX keyset, neonbinder holds PRODUCTION.
+# Rotation = add a new version, then redeploy the browser service (Cloud Run
+# resolves :latest when a revision is created, so a running revision keeps the
+# old value); secret-version-gc.yml prunes the older versions.
+#
+# No runtime IAM needed: the browser runtime SA already holds project-wide
+# roles/secretmanager.admin (see runtime_secretmanager_admin above). The
+# deployer SA gets read-only metadata on THIS secret only, so the deploy
+# workflows can preflight that a version exists before Cloud Run is asked to
+# mount one (a missing version fails the deploy with an opaque error).
+resource "google_secret_manager_secret" "ebay_client_secret" {
+  secret_id = "ebay-client-secret"
+
+  replication {
+    auto {}
+  }
+
+  labels = var.common_labels
+}
+
+# viewer = secrets.get/list + versions.list/get; it does NOT include
+# versions.access, so the deployer can see that a version exists but cannot
+# read the Cert ID.
+resource "google_secret_manager_secret_iam_member" "deployer_ebay_client_secret_viewer" {
+  secret_id = google_secret_manager_secret.ebay_client_secret.secret_id
+  role      = "roles/secretmanager.viewer"
+  member    = "serviceAccount:${google_service_account.deployer.email}"
+}
+
 # ──────────────────────────────────────────────
 # Preprocess FAST runtime SA (NEO-175, security control #2) — dedicated, not
 # shared with heavy's preprocess_runtime. Least-privilege reasons this is its
