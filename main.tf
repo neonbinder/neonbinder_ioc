@@ -1409,15 +1409,18 @@ resource "google_secret_manager_secret" "sportlots_automated_access" {
 #
 # Payload is the eBay Cert ID as a plain string (no JSON, no trailing newline).
 # neonbinder-dev holds the eBay SANDBOX keyset, neonbinder holds PRODUCTION.
-# Rotation = add a new version, then redeploy the browser service (Cloud Run
-# resolves :latest when a revision is created, so a running revision keeps the
-# old value); secret-version-gc.yml prunes the older versions.
+# Rotation = add a new version, then redeploy the browser service. The deploy
+# workflows pin the numeric version they resolve from `latest` (Cloud Run reads
+# secret env vars at instance start, so a floating :latest would go live on the
+# next cold start without a deploy); only a deploy changes the live value.
+# secret-version-gc.yml prunes older versions, so redeploy before it destroys
+# the one a running revision pins.
 #
-# No runtime IAM needed: the browser runtime SA already holds project-wide
-# roles/secretmanager.admin (see runtime_secretmanager_admin above). The
-# deployer SA gets read-only metadata on THIS secret only, so the deploy
-# workflows can preflight that a version exists before Cloud Run is asked to
-# mount one (a missing version fails the deploy with an opaque error).
+# IAM: the browser runtime SA gets an explicit accessor binding below, so this
+# dependency survives any future narrowing of its project-wide
+# roles/secretmanager.admin. The deployer SA gets read-only metadata on THIS
+# secret only, so the deploy workflows can preflight that the latest version is
+# enabled before Cloud Run is asked to mount it.
 resource "google_secret_manager_secret" "ebay_client_secret" {
   secret_id = "ebay-client-secret"
 
@@ -1426,6 +1429,14 @@ resource "google_secret_manager_secret" "ebay_client_secret" {
   }
 
   labels = var.common_labels
+}
+
+# Least-privilege read for the runtime SA: Cloud Run resolves this secret into
+# EBAY_CLIENT_SECRET as the runtime identity (NEO-415).
+resource "google_secret_manager_secret_iam_member" "runtime_ebay_client_secret_accessor" {
+  secret_id = google_secret_manager_secret.ebay_client_secret.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.runtime.email}"
 }
 
 # viewer = secrets.get/list + versions.list/get; it does NOT include
