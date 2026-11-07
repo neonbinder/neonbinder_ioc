@@ -274,26 +274,30 @@ variable "preprocess_fast_cpu" {
 
 variable "preprocess_fast_memory" {
   # Security control #5: sized for container_concurrency x peak-decode-RAM,
-  # not guessed. Grounded in the service's own code-enforced caps
-  # (services/preprocess/app/imaging.py, app/main.py) rather than observed
-  # numbers, because no fast instance has run in production yet to measure:
+  # from the service's own code-enforced caps (services/preprocess/app/imaging.py,
+  # app/main.py), then checked against a measurement:
   #
-  #   - MAX_IMAGE_PIXELS = 50_000_000 (app/imaging.py) is a hard-enforced
-  #     decode-time cap. A decoded RGB raster at that ceiling is
-  #     50_000_000 x 3 bytes = ~150MB; classical CV holds several derived
-  #     working copies at once (grayscale conversion, edge map, contour
-  #     scratch, resized candidates) rather than one buffer, so budget ~4x the
-  #     base raster as a single request's peak: ~600MB.
+  #   - MAX_IMAGE_PIXELS = 65_000_000 (app/imaging.py) is a hard-enforced
+  #     decode-time cap. It sits above the 64_144_128 px that real 64 MP
+  #     phones write. Pillow holds RGB at 4 bytes per pixel, so one decoded
+  #     raster at the cap is 65_000_000 x 4 bytes = ~260MB. The service code
+  #     assumes at most three live full-size copies per request: ~780MB.
   #   - MAX_IMAGE_BYTES = 32MB (app/main.py) bounds the compressed upload, not
-  #     the decode — already dominated by the pixel-count bound above for any
-  #     realistic phone-camera JPEG, so it does not change the estimate.
+  #     the decode. The pixel bound above dominates it for any realistic
+  #     phone-camera JPEG, so it does not change the estimate.
   #
-  # 8 concurrent requests x ~600MB peak = ~4.8Gi, plus a fixed ~800Mi-1Gi
-  # baseline for the Python/uvicorn/FastAPI process itself (not per-request).
-  # Rounds up to 8Gi for headroom rather than sitting right at the computed
-  # floor — this is a first-cut engineering estimate, not a measured number;
-  # revisit against real Cloud Run memory-utilization telemetry (per-instance
-  # memory/utilizations metric) after the first production week, same as
+  # Worst case: 8 concurrent requests x ~780MB = ~6.2Gi if every request
+  # peaked together, plus a fixed ~800Mi-1Gi baseline for the Python/uvicorn/
+  # FastAPI process (not per-request). 8Gi leaves headroom over that floor.
+  #
+  # Measured 2026-11-07 on the fast service at 8Gi and concurrency 8: waves
+  # of eight 64.9 MP requests sent at once, on both the decline path and the
+  # crop-and-write path. The highest memory reading was ~3.3Gi of 8Gi. No
+  # OOM, and every request returned 200. The service spread each wave so one
+  # instance held at most six requests at a time, and the metric samples
+  # about once a minute, so a short peak could fall between samples. Treat
+  # the reading as headroom evidence, not a hard ceiling. The value does not
+  # change. Keep watching per-instance memory/utilizations, same as
   # preprocess_fast_cpu above.
   description = "Memory allocation for the preprocess FAST Cloud Run service"
   type        = string
