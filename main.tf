@@ -1599,6 +1599,20 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
         # now sizes the FAST service — see its variable comment) to the
         # dedicated heavy variable.
         "autoscaling.knative.dev/maxScale" = tostring(var.heavy_preprocess_max_instances)
+        # NEO-484 C: second-generation execution environment. Measured on the
+        # spike, the same code starts in 188-200s on gen2 against 264-285s on
+        # gen1 (gVisor), and BiRefNet inference takes 20-31s against 31-37s at
+        # about half the CPU-seconds. The deploy workflows pass
+        # --execution-environment=gen2 on every heavy deploy so a CI revision
+        # and a Terraform revision agree. Fast stays on the default (gen1)
+        # until its own measurement says otherwise.
+        "run.googleapis.com/execution-environment" = "gen2"
+        # Declares what the deploy workflows already set with --no-cpu-boost
+        # (it was live on dev and prod but absent here, so every plan wanted
+        # to remove it). Kept off by decision (NEO-484 C): boost bills extra
+        # CPU for every start, and the start-time work is now in the gen2 and
+        # direct-ORT changes instead.
+        "run.googleapis.com/startup-cpu-boost" = "false"
       }
     }
 
@@ -1615,11 +1629,17 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
 
         # NEO-194: give the BiRefNet load room to finish before Cloud Run gives
         # up on the revision. Without this block Cloud Run applies its default
-        # -- ONE tcp attempt with a 240s deadline -- and the model load
-        # (measured 116-190s on dev) plus the heavy python imports regularly
-        # crossed it. A failed startup probe destroys the revision, so this was
-        # not a slow start, it was 7 prod and 100+ dev failures in 14 days and
-        # one broken release.
+        # -- ONE tcp attempt with a 240s deadline -- and the old rembg model
+        # load (measured 116-190s on dev) plus the heavy python imports
+        # regularly crossed it. A failed startup probe destroys the revision,
+        # so this was not a slow start, it was 7 prod and 100+ dev failures in
+        # 14 days and one broken release.
+        #
+        # NEO-484: probe every 2s (not 30s) for up to 300 attempts. The budget
+        # stays 600s because the old gen1 rembg image (~230-290s to start) can
+        # still be deployed under this template during the transition or a
+        # rollback; the 2s period stops a ~30s direct-ORT start from waiting
+        # ~15s on average for the next probe. See the probe variables.
         #
         # The container deliberately does NOT listen until the model is
         # resident: blocking here is what guarantees an instance is warm before
@@ -1634,7 +1654,7 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
           # A TCP connect either answers at once or not at all, so the per-probe
           # timeout only needs to cover the round trip. The budget lives in
           # period x failure_threshold, not here. Must be <= period_seconds.
-          timeout_seconds = 10
+          timeout_seconds = var.heavy_preprocess_startup_probe_timeout_seconds
 
           tcp_socket {
             port = 8080
