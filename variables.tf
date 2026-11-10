@@ -118,13 +118,24 @@ variable "preprocess_cpu" {
 }
 
 variable "preprocess_memory" {
-  # 16Gi since NEO-161: full BiRefNet's inference activations peak past 8Gi
-  # (measured OOM kills at 4601MiB@4Gi and 8326MiB@8Gi) and the lite model
-  # fails the quality bar (cannot find foil cards on the scanner belt).
+  # Heavy preprocess only (fast has preprocess_fast_memory). Applies to dev
+  # AND prod.
+  #
+  # NEO-161 raised it to 16Gi: full BiRefNet's inference activations peak
+  # past 8Gi (measured OOM kills at 4601MiB@4Gi and 8326MiB@8Gi) and the lite
+  # model fails the quality bar (cannot find foil cards on the scanner belt).
   # Paired with container_concurrency=1 so per-request peaks never stack.
-  description = "Memory allocation for the preprocess Cloud Run service"
+  #
+  # NEO-484 lowered it to 12Gi to cut the per-second memory bill. 30 days of
+  # per-minute p99 peaked at 10.4 GiB on dev and 9.3 GiB on prod, which is
+  # 87% and 77% of 12Gi. Rule (Jason, 2026-11-10): if the worst-case heavy
+  # run on gen2 peaks above 0.90 of 12Gi, this becomes "14Gi" instead. That
+  # is the only edit the fallback needs. Never go below the measured peak
+  # plus ~10%: an OOM kills the in-flight request, and with concurrency 1
+  # that is a whole card.
+  description = "Memory allocation for the heavy preprocess Cloud Run service"
   type        = string
-  default     = "16Gi"
+  default     = "12Gi"
 }
 
 variable "preprocess_container_concurrency" {
