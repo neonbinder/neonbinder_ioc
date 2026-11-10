@@ -1604,8 +1604,8 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
         # gen1 (gVisor), and BiRefNet inference takes 20-31s against 31-37s at
         # about half the CPU-seconds. The deploy workflows pass
         # --execution-environment=gen2 on every heavy deploy so a CI revision
-        # and a Terraform revision agree. Fast stays on the default (gen1)
-        # until its own measurement says otherwise.
+        # and a Terraform revision agree. Fast moved to gen2 too, on its own
+        # measurement (see neonbinder_preprocess_fast).
         "run.googleapis.com/execution-environment" = "gen2"
         # Declares what the deploy workflows already set with --no-cpu-boost
         # (it was live on dev and prod but absent here, so every plan wanted
@@ -1854,6 +1854,15 @@ resource "google_cloud_run_service" "neonbinder_preprocess_fast" {
       annotations = {
         "autoscaling.knative.dev/minScale" = "0"
         "autoscaling.knative.dev/maxScale" = tostring(var.preprocess_max_instances)
+        # NEO-484 C (S0b, 2026-11-10): gen2, measured against gen1 on two
+        # throwaway services. Cold start median over 10 starts per side was
+        # 28.0s vs 26.5s (1.06x, inside the 1.1x bar); classical-path wall
+        # time 0.835x of gen1; memory p99 0.13 of 8Gi. Single cold starts ranged
+        # 16-151s, so n=5 (1.16x) was too noisy to judge; judge on n>=10.
+        # The deploy workflows pass --execution-environment=gen2 on every
+        # fast deploy so CI and Terraform revisions agree. No startup CPU
+        # boost annotation: unlike heavy, it was never set live on fast.
+        "run.googleapis.com/execution-environment" = "gen2"
       }
     }
 
