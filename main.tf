@@ -2270,11 +2270,17 @@ resource "google_billing_budget" "gcp_spend" {
   amount {
     specified_amount {
       currency_code = "USD"
-      units         = "500"
+      units         = "100"
     }
   }
 
-  # Actual-spend thresholds at 20/50/80/100% of the $500/mo budget amount.
+  # NEO-484: $500 -> $100/mo. $500 was far above real spend, so the alerts
+  # said nothing useful; $100 is the level worth hearing about during alpha.
+  # Applying this mid-month sends every threshold already crossed at once.
+  #
+  # Actual-spend thresholds at 20/50/80/100% of the $100/mo budget amount
+  # ($20/$50/$80/$100), plus a FORECASTED_SPEND rule at 100% so the warning
+  # arrives when the month is on course to pass $100, not after it has.
   threshold_rules {
     threshold_percent = 0.2
     spend_basis       = "CURRENT_SPEND"
@@ -2290,6 +2296,10 @@ resource "google_billing_budget" "gcp_spend" {
   threshold_rules {
     threshold_percent = 1.0
     spend_basis       = "CURRENT_SPEND"
+  }
+  threshold_rules {
+    threshold_percent = 1.0
+    spend_basis       = "FORECASTED_SPEND"
   }
 
   # No all_updates_rule / pubsub_topic wired up: with no notification channels
