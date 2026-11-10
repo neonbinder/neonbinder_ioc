@@ -1714,12 +1714,18 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
         }
 
         # NEO-484: the dev result cache (see google_storage_bucket.
-        # preprocess_dev_cache). Empty means off; it is non-empty only where
-        # the bucket exists, which is dev. The deploy workflows keep it in
-        # step: dev lanes set it, preview and prod lanes remove it.
-        env {
-          name  = "PREPROCESS_DEV_CACHE_BUCKET"
-          value = var.create_preprocess_dev_cache_bucket ? google_storage_bucket.preprocess_dev_cache[0].name : ""
+        # preprocess_dev_cache). Present only where the bucket exists, which
+        # is dev; absent (not "") everywhere else, because the prod and
+        # preview deploy lanes REMOVE the variable on every deploy, and an
+        # empty-string block here would show as drift on every prod plan and
+        # re-add itself on every apply. The app treats unset and "" alike:
+        # cache off. Dev lanes set it, so dev stays drift-free after a deploy.
+        dynamic "env" {
+          for_each = var.create_preprocess_dev_cache_bucket ? [google_storage_bucket.preprocess_dev_cache[0].name] : []
+          content {
+            name  = "PREPROCESS_DEV_CACHE_BUCKET"
+            value = env.value
+          }
         }
       }
     }
@@ -1918,12 +1924,15 @@ resource "google_cloud_run_service" "neonbinder_preprocess_fast" {
           value = var.create_placeholder_bucket ? google_storage_bucket.placeholder_uploads[0].name : ""
         }
 
-        # NEO-484: same dev result cache and same rule as heavy's
-        # PREPROCESS_DEV_CACHE_BUCKET block above. Fast is where most Vision
-        # calls happen, so this is where most of the saving lands.
-        env {
-          name  = "PREPROCESS_DEV_CACHE_BUCKET"
-          value = var.create_preprocess_dev_cache_bucket ? google_storage_bucket.preprocess_dev_cache[0].name : ""
+        # NEO-484: same dev result cache and same dev-only, absent-elsewhere
+        # rule as heavy's PREPROCESS_DEV_CACHE_BUCKET block above. Fast is
+        # where most Vision calls happen, so most of the saving lands here.
+        dynamic "env" {
+          for_each = var.create_preprocess_dev_cache_bucket ? [google_storage_bucket.preprocess_dev_cache[0].name] : []
+          content {
+            name  = "PREPROCESS_DEV_CACHE_BUCKET"
+            value = env.value
+          }
         }
       }
     }
