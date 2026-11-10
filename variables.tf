@@ -118,13 +118,24 @@ variable "preprocess_cpu" {
 }
 
 variable "preprocess_memory" {
-  # 16Gi since NEO-161: full BiRefNet's inference activations peak past 8Gi
-  # (measured OOM kills at 4601MiB@4Gi and 8326MiB@8Gi) and the lite model
-  # fails the quality bar (cannot find foil cards on the scanner belt).
+  # Heavy preprocess only (fast has preprocess_fast_memory). Applies to dev
+  # AND prod.
+  #
+  # NEO-161 raised it to 16Gi: full BiRefNet's inference activations peak
+  # past 8Gi (measured OOM kills at 4601MiB@4Gi and 8326MiB@8Gi) and the lite
+  # model fails the quality bar (cannot find foil cards on the scanner belt).
   # Paired with container_concurrency=1 so per-request peaks never stack.
-  description = "Memory allocation for the preprocess Cloud Run service"
+  #
+  # NEO-484 lowered it to 12Gi to cut the per-second memory bill. 30 days of
+  # per-minute p99 peaked at 10.4 GiB on dev and 9.3 GiB on prod, which is
+  # 87% and 77% of 12Gi. Rule (Jason, 2026-11-10): if the worst-case heavy
+  # run on gen2 peaks above 0.90 of 12Gi, this becomes "14Gi" instead. That
+  # is the only edit the fallback needs. Never go below the measured peak
+  # plus ~10%: an OOM kills the in-flight request, and with concurrency 1
+  # that is a whole card.
+  description = "Memory allocation for the heavy preprocess Cloud Run service"
   type        = string
-  default     = "16Gi"
+  default     = "12Gi"
 }
 
 variable "preprocess_container_concurrency" {
@@ -138,37 +149,61 @@ variable "preprocess_container_concurrency" {
 }
 
 variable "heavy_preprocess_startup_probe_period_seconds" {
-  # NEO-194. The heavy service loads ~930MB of BiRefNet before it can serve,
-  # measured at 116-190s on dev (p50 ~160s, spread 74s) with the
-  # torch/transformers/rembg/onnxruntime imports still to pay on top. Cloud
-  # Run's DEFAULT startup probe is one TCP attempt with a 240s deadline, so
-  # that load was consuming ~80% of the budget and losing the race outright 7
-  # times in prod and 100+ times on dev over 14 days -- a failed startup probe
-  # DESTROYS the revision, which is how it took down the NEO-191 release.
+  # NEO-194. A failed startup probe DESTROYS the revision, and the heavy
+  # container deliberately does not listen until its BiRefNet model is
+  # resident (see the startup_probe comment in main.tf). Cloud Run's default
+  # probe is one TCP attempt with a 240s deadline; the old load (rembg +
+  # numba-compiled pymatting + session) took 116-190s on dev before the
+  # imports, lost that race 7 times in prod and 100+ times on dev in 14 days,
+  # and took down the NEO-191 release. So the budget is explicit.
   #
-  # period x failure_threshold is the real budget; 30 x 20 = 600s, a bit over
-  # 3x the observed worst case. The provider caps a startup probe's period at
-  # 240s, so headroom has to come from the threshold rather than the period.
+  # period x failure_threshold is the budget: 2 x 300 = 600s.
+  #
+  # NEO-484 changed only the shape, not the budget:
+  #   * period 30 -> 2. TCP probing is a connect, nothing more, so a short
+  #     period costs nothing, and at 30s an instance that became ready just
+  #     after a probe sat idle for ~15s on average before it could serve.
+  #     With direct-ORT BiRefNet on gen2 a cold start is ~20-30s, so that
+  #     wait was half the start.
+  #   * threshold 20 -> 300, to keep 600s. That is far above the new ~30s
+  #     start on purpose: during
+  #     the transition, and on any rollback, the OLD gen1 rembg image can
+  #     still start under this same template (traffic and image are owned by
+  #     the deploy workflow, not Terraform), and it needs ~230-290s. A budget
+  #     sized to the new image would destroy those revisions.
+  #   * If the API ever rejects 300 at apply, use period 3 x threshold 200
+  #     (still 600s; an average wait of 1.5s instead of 1s).
   #
   # The alternative -- warming in a background thread so the container listens
   # immediately -- was built and rejected (see the NEO-194 discussion on
   # neonbinder#195): it moves the load INSIDE the request, where it is charged
-  # against Cloud Run's 300s request cap and every client's timeout, and it
-  # lets an instance serve while cold. Blocking startup is what guarantees
-  # "warm before serving", and with container_concurrency=1 that guarantee is
+  # against the request timeout and every client's timeout, and it lets an
+  # instance serve while cold. Blocking startup is what guarantees "warm
+  # before serving", and with container_concurrency=1 that guarantee is
   # load-bearing: any second concurrent request starts a NEW instance, so
   # clients cannot warm their way out of it.
   description = "Seconds between startup probe attempts for the heavy preprocess service"
   type        = number
-  default     = 30
+  default     = 2
 }
 
 variable "heavy_preprocess_startup_probe_failure_threshold" {
-  # Paired with the period above: 30 x 20 = 600s of startup budget. See that
-  # variable for why the budget has to be this large.
+  # Paired with the period above: 2 x 300 = 600s of startup budget. See that
+  # variable for why the budget stays at 600s even though the new image
+  # starts in ~30s.
   description = "Startup probe attempts before the heavy preprocess revision is failed"
   type        = number
-  default     = 20
+  default     = 300
+}
+
+variable "heavy_preprocess_startup_probe_timeout_seconds" {
+  # NEO-484: 10 -> 1. A TCP connect either answers at once or not at all, so
+  # the per-attempt timeout only has to cover the round trip; the budget lives
+  # in period x failure_threshold. Cloud Run requires timeout <= period, so
+  # this had to drop with the 2s period.
+  description = "Per-attempt timeout of the heavy preprocess startup probe (must be <= the period)"
+  type        = number
+  default     = 1
 }
 
 variable "preprocess_max_instances" {
@@ -357,6 +392,12 @@ variable "create_prizes_bucket" {
 
 variable "create_preprocess_fixtures_bucket" {
   description = "Whether to create the preprocess test-fixture GCS bucket (dev only). Test images for the `services/preprocess` integration tests live here — too large to commit to git. Not needed in prod."
+  type        = bool
+  default     = false
+}
+
+variable "create_preprocess_dev_cache_bucket" {
+  description = "Whether to create the preprocess dev result-cache GCS bucket (dev only, NEO-484) and point both preprocess services at it through PREPROCESS_DEV_CACHE_BUCKET. Must stay false in prod: the cache exists to stop E2E re-paying for Vision and BiRefNet on dev."
   type        = bool
   default     = false
 }
