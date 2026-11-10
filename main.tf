@@ -1647,6 +1647,15 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
           name  = "GCS_PLACEHOLDER_BUCKET"
           value = var.create_placeholder_bucket ? google_storage_bucket.placeholder_uploads[0].name : ""
         }
+
+        # NEO-484: the dev result cache (see google_storage_bucket.
+        # preprocess_dev_cache). Empty means off; it is non-empty only where
+        # the bucket exists, which is dev. The deploy workflows keep it in
+        # step: dev lanes set it, preview and prod lanes remove it.
+        env {
+          name  = "PREPROCESS_DEV_CACHE_BUCKET"
+          value = var.create_preprocess_dev_cache_bucket ? google_storage_bucket.preprocess_dev_cache[0].name : ""
+        }
       }
     }
   }
@@ -1843,6 +1852,14 @@ resource "google_cloud_run_service" "neonbinder_preprocess_fast" {
           name  = "GCS_PLACEHOLDER_BUCKET"
           value = var.create_placeholder_bucket ? google_storage_bucket.placeholder_uploads[0].name : ""
         }
+
+        # NEO-484: same dev result cache and same rule as heavy's
+        # PREPROCESS_DEV_CACHE_BUCKET block above. Fast is where most Vision
+        # calls happen, so this is where most of the saving lands.
+        env {
+          name  = "PREPROCESS_DEV_CACHE_BUCKET"
+          value = var.create_preprocess_dev_cache_bucket ? google_storage_bucket.preprocess_dev_cache[0].name : ""
+        }
       }
     }
   }
@@ -2024,6 +2041,87 @@ resource "google_storage_bucket_iam_member" "preprocess_fixtures_deployer_reader
   bucket = google_storage_bucket.preprocess_fixtures[0].name
   role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.preprocess_deployer.email}"
+}
+
+# ──────────────────────────────────────────────
+# Preprocess dev result cache — dev only (NEO-484)
+# ──────────────────────────────────────────────
+# E2E on dev sends the same card photos through preprocess on every run, and
+# each one paid for a Cloud Vision call and a BiRefNet inference again. This
+# bucket caches those two results (Vision responses and BiRefNet alpha
+# planes), keyed by a hash of the exact input bytes plus everything that can
+# change the output, so a repeat input skips the paid or slow call.
+#
+# The cache is a dev-only cost control, never a behaviour change, and the app
+# turns it on only when all of these hold (services/preprocess, the cache
+# policy module):
+#   * ENVIRONMENT == "dev";
+#   * PREPROCESS_DEV_CACHE_BUCKET (below, on both services) is non-empty —
+#     Terraform sets it only where this bucket exists, the dev deploy lanes
+#     set it, and the preview and prod lanes remove it;
+#   * the request Host is the untagged service URL (no `---`), so pr-<N> and
+#     sha-* blue/green revisions always run live.
+# This file supplies the last gate: only the dev preprocess runtime SAs can
+# use the bucket, and there is no prod mirror (no prod.tfvars flag).
+#
+# Contents are disposable by design: any object can vanish and the caller
+# just runs live and rewrites it. Hence no versioning, no soft delete (it
+# would bill a deleted object for 7 more days) and a 7-day delete, which also
+# bounds how long a stale entry can survive a key-format mistake.
+resource "google_storage_bucket" "preprocess_dev_cache" {
+  count         = var.create_preprocess_dev_cache_bucket ? 1 : 0
+  name          = "neonbinder-dev-preprocess-cache"
+  location      = var.gcp_region
+  storage_class = "STANDARD"
+
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+
+  versioning {
+    enabled = false
+  }
+
+  soft_delete_policy {
+    retention_duration_seconds = 0
+  }
+
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      age = 7
+    }
+  }
+
+  labels = var.common_labels
+}
+
+# Both preprocess roles read and write the cache: fast calls Vision, heavy
+# runs BiRefNet (and Vision on escalations). objectUser is read, create,
+# overwrite and delete objects, with no bucket-level IAM or settings rights.
+# Writes use if_generation_match preconditions, which need nothing beyond it.
+resource "google_storage_bucket_iam_member" "preprocess_dev_cache_heavy_user" {
+  count  = var.create_preprocess_dev_cache_bucket ? 1 : 0
+  bucket = google_storage_bucket.preprocess_dev_cache[0].name
+  role   = "roles/storage.objectUser"
+  member = "serviceAccount:${google_service_account.preprocess_runtime.email}"
+}
+
+resource "google_storage_bucket_iam_member" "preprocess_dev_cache_fast_user" {
+  count  = var.create_preprocess_dev_cache_bucket ? 1 : 0
+  bucket = google_storage_bucket.preprocess_dev_cache[0].name
+  role   = "roles/storage.objectUser"
+  member = "serviceAccount:${google_service_account.preprocess_fast_runtime.email}"
+}
+
+# Developers inspect and purge the cache (a poisoned entry, a key-format
+# change) and run the local integration test under the itest/ prefix.
+resource "google_storage_bucket_iam_member" "preprocess_dev_cache_developer_admin" {
+  for_each = var.create_preprocess_dev_cache_bucket ? toset(var.developer_emails) : toset([])
+  bucket   = google_storage_bucket.preprocess_dev_cache[0].name
+  role     = "roles/storage.objectAdmin"
+  member   = "user:${each.value}"
 }
 
 # ──────────────────────────────────────────────

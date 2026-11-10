@@ -361,6 +361,12 @@ variable "create_preprocess_fixtures_bucket" {
   default     = false
 }
 
+variable "create_preprocess_dev_cache_bucket" {
+  description = "Whether to create the preprocess dev result-cache GCS bucket (dev only, NEO-484) and point both preprocess services at it through PREPROCESS_DEV_CACHE_BUCKET. Must stay false in prod: the cache exists to stop E2E re-paying for Vision and BiRefNet on dev."
+  type        = bool
+  default     = false
+}
+
 variable "create_reference_seed_bucket" {
   description = "Whether to create the private reference-seed GCS bucket (dev only, NEO-330). Holds the licence-bound prod-derived reference catalogue bundle that PR Convex previews import before E2E. Public access is prevented. Not needed in prod."
   type        = bool
