@@ -158,7 +158,8 @@ resource "google_service_account_iam_member" "deployer_act_as_runtime" {
 # to 117.8 GB (dev) / 41.7 GB (prod) — ~$15/month.
 #
 #   - "delete-old-untagged" WORKS. Verified: zero untagged images older than
-#     14 days in either project. Left exactly as-is; do not touch it.
+#     14 days in either project. (NEO-484 later shortened it to 7 days; see
+#     the NEO-484 section at the end of this block.)
 #
 #   - "keep-recent-tagged" was a NO-OP. In Artifact Registry a KEEP policy only
 #     protects versions *from a DELETE policy* — it never deletes anything on
@@ -171,7 +172,7 @@ resource "google_service_account_iam_member" "deployer_act_as_runtime" {
 # protect against, and split per-package because the two images have opposite
 # characteristics.
 #
-# WHY keep_count = 10 FOR BROWSER
+# WHY keep_count WAS 10 FOR BROWSER (history; NEO-484 set 6, see below)
 #
 # The floor is not "how many rollbacks do we want" — it is "how many images are
 # referenced by a revision that still exists". Delete an image a retained
@@ -236,7 +237,7 @@ resource "google_service_account_iam_member" "deployer_act_as_runtime" {
 # and `delete-stale-pr-images` only matches the `pr-` prefix. They accumulated
 # without bound. `delete-tagged-preprocess` below closes that.
 #
-# PREPROCESS NOW MATCHES BROWSER (keep 10 + 14d) — NEO-130 removed the reason
+# PREPROCESS MATCHES BROWSER (then keep 10 + 14d, now 6 + 14d) — NEO-130 removed the reason
 # they diverged. Keeping the history here because the divergence looked
 # arbitrary without it, and someone will otherwise "simplify" it back:
 #
@@ -270,8 +271,49 @@ resource "google_service_account_iam_member" "deployer_act_as_runtime" {
 #   * the historical backlog was swept, so nothing pre-split is left consuming
 #     the window — dev and prod each held exactly 1 image
 #
-# Backstop: `revision-image-check.yml` in the monorepo asserts weekly that every
+# Backstop: `revision-image-check.yml` in the monorepo asserts that every
 # serving revision's digest still exists, one hour after the GC sweep.
+#
+# NEO-484 — OCI INDEXES, AND THE NUMBERS NOW IN FORCE
+#
+# Since 2026-11-08 the CI `docker build` pushes have been OCI image indexes,
+# not single manifests (BuildKit's default provenance attestation). Each push
+# stores THREE versions in the package:
+#
+#   * the index, which carries the tags (`<sha>`, `latest`, `pr-<N>`);
+#   * the platform image manifest, UNTAGGED — and this is the digest a Cloud
+#     Run revision pins;
+#   * the attestation manifest, UNTAGGED.
+#
+# Two consequences:
+#
+#   1. `most_recent_versions` counts all three, so keep_count = N protects
+#      about N/3 deploys, not N. keep 10 had silently become ~3 deploys deep.
+#   2. A serving revision's digest is an untagged child. It is safe only
+#      because its tagged parent index still exists: Artifact Registry does
+#      not collect a manifest an existing index references, so the child
+#      lives exactly as long as its parent. `delete-old-untagged` therefore
+#      never reaches a live child; it reaps orphans.
+#
+# The monorepo's builds go back to single manifests with
+# `--provenance=false --sbom=false` (NEO-484), after which one deploy is one
+# version again. The numbers below are chosen to be safe in BOTH states:
+#
+#   * keep-recent 10 -> 6. Single-manifest: 6 deploys deep. Index pushes
+#     (until every package has rolled over): 2 deploys, which still covers
+#     the serving image and the one rollback revision `revision-gc` keeps.
+#     The 14-day age gate on delete-tagged-* is unchanged, so nothing younger
+#     than 14 days is ever collected whatever its rank.
+#   * delete-old-untagged 14 -> 7 days. Live children are protected by their
+#     parent (point 2), so this only shortens how long orphans are billed.
+#   * delete-stale-pr-images 30 -> 14 days. A preview whose PR has not pushed
+#     for two weeks gets rebuilt on its next push; the revision checker warns
+#     at 11 days on a pin held only by a `pr-` tag.
+#
+# Before any apply that touches these, run `scripts/check-revision-images.sh`
+# in the monorepo against every service and environment: it classifies each
+# pinned digest as tagged, child-of-tagged-index or unprotected, and an
+# unprotected pin must be fixed first.
 #
 # Repo cap is 10 cleanup policies; this uses 6.
 #
@@ -290,63 +332,63 @@ resource "google_artifact_registry_repository" "gcr_io" {
     id     = "delete-old-untagged"
     action = "DELETE"
 
+    # Reaps orphaned untagged manifests only: a child of a still-tagged index
+    # (which is what a serving revision pins since 2026-11-08) is protected
+    # by its parent. 14 -> 7 days in NEO-484; see the NEO-484 section above.
     condition {
       tag_state  = "UNTAGGED"
-      older_than = "1209600s" # 14 days
+      older_than = "604800s" # 7 days
     }
   }
 
-  # Protects the 10 newest browser builds from delete-tagged-browser below.
+  # Protects the 6 newest browser VERSIONS from delete-tagged-browser below.
   # Package-scoped so the count is unambiguously per-image rather than
-  # repo-wide — the old unscoped policy left that in doubt.
+  # repo-wide — the old unscoped policy left that in doubt. A version is not a
+  # deploy: an OCI-index push stores ~3 (index, image, attestation), a
+  # single-manifest push stores 1. 10 -> 6 in NEO-484; see the section above.
   cleanup_policies {
     id     = "keep-recent-browser"
     action = "KEEP"
 
     most_recent_versions {
       package_name_prefixes = ["neonbinder-browser"]
-      keep_count            = 10
+      keep_count            = 6
     }
   }
 
-  # Purely protective: no DELETE policy targets preprocess by package, so this
-  # only guards against delete-stale-pr-images catching a pr-tagged preprocess
-  # image that a live revision still needs.
+  # Same guard for preprocess, against delete-tagged-preprocess below. Since
+  # NEO-130 previews push to a separate `-preview` package, so rank here is
+  # advanced only by merges. 10 -> 6 in NEO-484, with the same versions-vs-
+  # deploys caveat as keep-recent-browser.
   cleanup_policies {
     id     = "keep-recent-preprocess"
     action = "KEEP"
 
     most_recent_versions {
-      # Matches browser since NEO-130 — previews no longer share this package,
-      # so 10 means 10 DEPLOYS deep rather than 10 pushes of mixed provenance.
       package_name_prefixes = ["neonbinder-preprocess"]
-      keep_count            = 10
+      keep_count            = 6
     }
   }
 
-  # The actual reclaim. Unbounded by age on purpose — keep-recent-browser above
-  # is the guard, so retention is expressed as "the last 10 builds" rather than
-  # as a date. An age gate would leave unpinned 30-90 day old main-branch builds
-  # accumulating indefinitely, which is most of what filled the repo.
-  # TWO independent guards, because rank alone is not safe here.
+  # The actual reclaim, with TWO independent guards, because rank alone is not
+  # safe here.
   #
   # An image is collected only if it is BOTH older than 14 days AND outside the
-  # newest 10 (keep-recent-browser above). Either condition on its own protects
-  # it. That redundancy is load-bearing, not belt-and-braces:
+  # newest 6 versions (keep-recent-browser above). Either condition on its own
+  # protects it. That redundancy is load-bearing, not belt-and-braces:
   #
-  # PR previews push to THIS SAME package (`neonbinder-browser:pr-<N>`), so
-  # version rank is driven by total push volume, not by deploy count. Measured
-  # 2026-08-06: dev averages 1.8 pushes/day but spiked to 13 IN ONE DAY. With a
-  # rank-only guard, one busy PR day pushes the live serving image past the keep
-  # window and deletes it — and since every revision is minScale=0, the next
-  # request cold-starts against a missing image and every request fails. The age
-  # gate makes that impossible: nothing under 14 days old is ever collected,
-  # whatever the preview churn does to its rank.
+  #   * The age gate protects DEV, where a burst of merges can push the serving
+  #     image down the rank (and before NEO-130, PR previews pushed into this
+  #     same package: 13 pushes in one day was measured). Nothing under 14 days
+  #     old is ever collected, whatever happens to its rank. Every revision is
+  #     minScale=0, so a collected serving image means every request fails.
+  #   * The rank guard protects PROD, whose risk is the opposite shape: prod
+  #     deploys rarely, so its serving image is often older than 14 days but
+  #     always at the top of the rank.
   #
-  # Conversely the rank guard is what protects PROD, whose risk is the opposite
-  # shape: prod pushes only ~0.4/day, so an image 10 builds deep is ~25 days old
-  # and the age gate alone would have collected it. Prod's LOW deploy frequency
-  # is what forces keep_count as high as 10.
+  # This stays at 14 days in NEO-484 deliberately: with index pushes, rank
+  # covers only ~2 deploys, so the age gate is doing more of the work until
+  # single-manifest builds have rolled through.
   cleanup_policies {
     id     = "delete-tagged-browser"
     action = "DELETE"
@@ -392,8 +434,11 @@ resource "google_artifact_registry_repository" "gcr_io" {
   # retention policy is least-privilege, whereas blanket registry delete from CI
   # is a supply-chain risk for no benefit.
   #
-  # 30 days rather than unbounded because a long-lived PR branch can legitimately
-  # keep redeploying the same preview.
+  # Age-gated rather than immediate because a long-lived PR branch can
+  # legitimately keep redeploying the same preview. 30 -> 14 days in NEO-484:
+  # two weeks without a push is a stale preview, and its next push rebuilds
+  # the image anyway. `scripts/check-revision-images.sh` warns at 11 days when
+  # a revision's image is held only by a `pr-` tag.
   cleanup_policies {
     id     = "delete-stale-pr-images"
     action = "DELETE"
@@ -401,7 +446,7 @@ resource "google_artifact_registry_repository" "gcr_io" {
     condition {
       tag_state    = "TAGGED"
       tag_prefixes = ["pr-"]
-      older_than   = "2592000s" # 30 days
+      older_than   = "1209600s" # 14 days
     }
   }
 }
@@ -1554,6 +1599,20 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
         # now sizes the FAST service — see its variable comment) to the
         # dedicated heavy variable.
         "autoscaling.knative.dev/maxScale" = tostring(var.heavy_preprocess_max_instances)
+        # NEO-484 C: second-generation execution environment. Measured on the
+        # spike, the same code starts in 188-200s on gen2 against 264-285s on
+        # gen1 (gVisor), and BiRefNet inference takes 20-31s against 31-37s at
+        # about half the CPU-seconds. The deploy workflows pass
+        # --execution-environment=gen2 on every heavy deploy so a CI revision
+        # and a Terraform revision agree. Fast moved to gen2 too, on its own
+        # measurement (see neonbinder_preprocess_fast).
+        "run.googleapis.com/execution-environment" = "gen2"
+        # Declares what the deploy workflows already set with --no-cpu-boost
+        # (it was live on dev and prod but absent here, so every plan wanted
+        # to remove it). Kept off by decision (NEO-484 C): boost bills extra
+        # CPU for every start, and the start-time work is now in the gen2 and
+        # direct-ORT changes instead.
+        "run.googleapis.com/startup-cpu-boost" = "false"
       }
     }
 
@@ -1570,11 +1629,17 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
 
         # NEO-194: give the BiRefNet load room to finish before Cloud Run gives
         # up on the revision. Without this block Cloud Run applies its default
-        # -- ONE tcp attempt with a 240s deadline -- and the model load
-        # (measured 116-190s on dev) plus the heavy python imports regularly
-        # crossed it. A failed startup probe destroys the revision, so this was
-        # not a slow start, it was 7 prod and 100+ dev failures in 14 days and
-        # one broken release.
+        # -- ONE tcp attempt with a 240s deadline -- and the old rembg model
+        # load (measured 116-190s on dev) plus the heavy python imports
+        # regularly crossed it. A failed startup probe destroys the revision,
+        # so this was not a slow start, it was 7 prod and 100+ dev failures in
+        # 14 days and one broken release.
+        #
+        # NEO-484: probe every 2s (not 30s) for up to 300 attempts. The budget
+        # stays 600s because the old gen1 rembg image (~230-290s to start) can
+        # still be deployed under this template during the transition or a
+        # rollback; the 2s period stops a ~30s direct-ORT start from waiting
+        # ~15s on average for the next probe. See the probe variables.
         #
         # The container deliberately does NOT listen until the model is
         # resident: blocking here is what guarantees an instance is warm before
@@ -1589,7 +1654,7 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
           # A TCP connect either answers at once or not at all, so the per-probe
           # timeout only needs to cover the round trip. The budget lives in
           # period x failure_threshold, not here. Must be <= period_seconds.
-          timeout_seconds = 10
+          timeout_seconds = var.heavy_preprocess_startup_probe_timeout_seconds
 
           tcp_socket {
             port = 8080
@@ -1646,6 +1711,21 @@ resource "google_cloud_run_service" "neonbinder_preprocess" {
         env {
           name  = "GCS_PLACEHOLDER_BUCKET"
           value = var.create_placeholder_bucket ? google_storage_bucket.placeholder_uploads[0].name : ""
+        }
+
+        # NEO-484: the dev result cache (see google_storage_bucket.
+        # preprocess_dev_cache). Present only where the bucket exists, which
+        # is dev; absent (not "") everywhere else, because the prod and
+        # preview deploy lanes REMOVE the variable on every deploy, and an
+        # empty-string block here would show as drift on every prod plan and
+        # re-add itself on every apply. The app treats unset and "" alike:
+        # cache off. Dev lanes set it, so dev stays drift-free after a deploy.
+        dynamic "env" {
+          for_each = var.create_preprocess_dev_cache_bucket ? [google_storage_bucket.preprocess_dev_cache[0].name] : []
+          content {
+            name  = "PREPROCESS_DEV_CACHE_BUCKET"
+            value = env.value
+          }
         }
       }
     }
@@ -1774,6 +1854,15 @@ resource "google_cloud_run_service" "neonbinder_preprocess_fast" {
       annotations = {
         "autoscaling.knative.dev/minScale" = "0"
         "autoscaling.knative.dev/maxScale" = tostring(var.preprocess_max_instances)
+        # NEO-484 C (S0b, 2026-11-10): gen2, measured against gen1 on two
+        # throwaway services. Cold start median over 10 starts per side was
+        # 28.0s vs 26.5s (1.06x, inside the 1.1x bar); classical-path wall
+        # time 0.835x of gen1; memory p99 0.13 of 8Gi. Single cold starts ranged
+        # 16-151s, so n=5 (1.16x) was too noisy to judge; judge on n>=10.
+        # The deploy workflows pass --execution-environment=gen2 on every
+        # fast deploy so CI and Terraform revisions agree. No startup CPU
+        # boost annotation: unlike heavy, it was never set live on fast.
+        "run.googleapis.com/execution-environment" = "gen2"
       }
     }
 
@@ -1842,6 +1931,17 @@ resource "google_cloud_run_service" "neonbinder_preprocess_fast" {
         env {
           name  = "GCS_PLACEHOLDER_BUCKET"
           value = var.create_placeholder_bucket ? google_storage_bucket.placeholder_uploads[0].name : ""
+        }
+
+        # NEO-484: same dev result cache and same dev-only, absent-elsewhere
+        # rule as heavy's PREPROCESS_DEV_CACHE_BUCKET block above. Fast is
+        # where most Vision calls happen, so most of the saving lands here.
+        dynamic "env" {
+          for_each = var.create_preprocess_dev_cache_bucket ? [google_storage_bucket.preprocess_dev_cache[0].name] : []
+          content {
+            name  = "PREPROCESS_DEV_CACHE_BUCKET"
+            value = env.value
+          }
         }
       }
     }
@@ -2027,6 +2127,87 @@ resource "google_storage_bucket_iam_member" "preprocess_fixtures_deployer_reader
 }
 
 # ──────────────────────────────────────────────
+# Preprocess dev result cache — dev only (NEO-484)
+# ──────────────────────────────────────────────
+# E2E on dev sends the same card photos through preprocess on every run, and
+# each one paid for a Cloud Vision call and a BiRefNet inference again. This
+# bucket caches those two results (Vision responses and BiRefNet alpha
+# planes), keyed by a hash of the exact input bytes plus everything that can
+# change the output, so a repeat input skips the paid or slow call.
+#
+# The cache is a dev-only cost control, never a behaviour change, and the app
+# turns it on only when all of these hold (services/preprocess, the cache
+# policy module):
+#   * ENVIRONMENT == "dev";
+#   * PREPROCESS_DEV_CACHE_BUCKET (below, on both services) is non-empty —
+#     Terraform sets it only where this bucket exists, the dev deploy lanes
+#     set it, and the preview and prod lanes remove it;
+#   * the request Host is the untagged service URL (no `---`), so pr-<N> and
+#     sha-* blue/green revisions always run live.
+# This file supplies the last gate: only the dev preprocess runtime SAs can
+# use the bucket, and there is no prod mirror (no prod.tfvars flag).
+#
+# Contents are disposable by design: any object can vanish and the caller
+# just runs live and rewrites it. Hence no versioning, no soft delete (it
+# would bill a deleted object for 7 more days) and a 7-day delete, which also
+# bounds how long a stale entry can survive a key-format mistake.
+resource "google_storage_bucket" "preprocess_dev_cache" {
+  count         = var.create_preprocess_dev_cache_bucket ? 1 : 0
+  name          = "neonbinder-dev-preprocess-cache"
+  location      = var.gcp_region
+  storage_class = "STANDARD"
+
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+
+  versioning {
+    enabled = false
+  }
+
+  soft_delete_policy {
+    retention_duration_seconds = 0
+  }
+
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      age = 7
+    }
+  }
+
+  labels = var.common_labels
+}
+
+# Both preprocess roles read and write the cache: fast calls Vision, heavy
+# runs BiRefNet (and Vision on escalations). objectUser is read, create,
+# overwrite and delete objects, with no bucket-level IAM or settings rights.
+# Writes use if_generation_match preconditions, which need nothing beyond it.
+resource "google_storage_bucket_iam_member" "preprocess_dev_cache_heavy_user" {
+  count  = var.create_preprocess_dev_cache_bucket ? 1 : 0
+  bucket = google_storage_bucket.preprocess_dev_cache[0].name
+  role   = "roles/storage.objectUser"
+  member = "serviceAccount:${google_service_account.preprocess_runtime.email}"
+}
+
+resource "google_storage_bucket_iam_member" "preprocess_dev_cache_fast_user" {
+  count  = var.create_preprocess_dev_cache_bucket ? 1 : 0
+  bucket = google_storage_bucket.preprocess_dev_cache[0].name
+  role   = "roles/storage.objectUser"
+  member = "serviceAccount:${google_service_account.preprocess_fast_runtime.email}"
+}
+
+# Developers inspect and purge the cache (a poisoned entry, a key-format
+# change) and run the local integration test under the itest/ prefix.
+resource "google_storage_bucket_iam_member" "preprocess_dev_cache_developer_admin" {
+  for_each = var.create_preprocess_dev_cache_bucket ? toset(var.developer_emails) : toset([])
+  bucket   = google_storage_bucket.preprocess_dev_cache[0].name
+  role     = "roles/storage.objectAdmin"
+  member   = "user:${each.value}"
+}
+
+# ──────────────────────────────────────────────
 # Reference-seed bucket — dev only (NEO-330)
 # ──────────────────────────────────────────────
 # Private home for the prod-derived reference-seed bundle that PR Convex
@@ -2127,11 +2308,17 @@ resource "google_billing_budget" "gcp_spend" {
   amount {
     specified_amount {
       currency_code = "USD"
-      units         = "500"
+      units         = "100"
     }
   }
 
-  # Actual-spend thresholds at 20/50/80/100% of the $500/mo budget amount.
+  # NEO-484: $500 -> $100/mo. $500 was far above real spend, so the alerts
+  # said nothing useful; $100 is the level worth hearing about during alpha.
+  # Applying this mid-month sends every threshold already crossed at once.
+  #
+  # Actual-spend thresholds at 20/50/80/100% of the $100/mo budget amount
+  # ($20/$50/$80/$100), plus a FORECASTED_SPEND rule at 100% so the warning
+  # arrives when the month is on course to pass $100, not after it has.
   threshold_rules {
     threshold_percent = 0.2
     spend_basis       = "CURRENT_SPEND"
@@ -2147,6 +2334,10 @@ resource "google_billing_budget" "gcp_spend" {
   threshold_rules {
     threshold_percent = 1.0
     spend_basis       = "CURRENT_SPEND"
+  }
+  threshold_rules {
+    threshold_percent = 1.0
+    spend_basis       = "FORECASTED_SPEND"
   }
 
   # No all_updates_rule / pubsub_topic wired up: with no notification channels
