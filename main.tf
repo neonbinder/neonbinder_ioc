@@ -881,7 +881,7 @@ resource "google_iam_workload_identity_pool_provider" "github" {
     "attribute.ref"        = "assertion.ref"
     "attribute.event_name" = "assertion.event_name"
     # NEO-115: `job_workflow_ref` is the workflow FILE that minted the token
-    # (e.g. "neonbinder/neonbinder/.github/workflows/secret-version-gc.yml@refs/heads/main"),
+    # (e.g. "neonbinder/neonbinder-app/.github/workflows/secret-version-gc.yml@refs/heads/main"),
     # which `repository` and `ref` cannot express — they identify the repo and
     # the branch, not which of its workflows is running. Mapping it here is
     # inert for every existing binding; only the secret-gc SA binds on it. See

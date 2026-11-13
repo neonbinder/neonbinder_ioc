@@ -86,15 +86,15 @@ jobs:
           ACTUAL_FAST=$(grep -E '^preprocess_max_instances[[:space:]]*=' "${TF_VAR_FILE}" | grep -oE '[0-9]+' | head -1)
           echo "${TF_VAR_FILE}: heavy_preprocess_max_instances=$ACTUAL_HEAVY preprocess_max_instances=$ACTUAL_FAST"
 
-          URL="https://raw.githubusercontent.com/neonbinder/neonbinder/main/apps/web/convex/preprocessCapacity.json"
+          URL="https://raw.githubusercontent.com/neonbinder/neonbinder-app/main/apps/web/convex/preprocessCapacity.json"
           HTTP_CODE=$(curl -sS --retry 3 --retry-all-errors --max-time 20 -o capacity.json -w "%{http_code}" "$URL")
 
           if [ "$HTTP_CODE" = "404" ]; then
             if [ "$ENV_NAME" = "prod" ]; then
-              echo "::error::preprocessCapacity.json not found on neonbinder/neonbinder@main (404) while planning/applying PROD. Prod's rollout order requires the monorepo file to exist before any prod apply, so a 404 here is a real fault, not a pending merge."
+              echo "::error::preprocessCapacity.json not found on neonbinder/neonbinder-app@main (404) while planning/applying PROD. Prod's rollout order requires the monorepo file to exist before any prod apply, so a 404 here is a real fault, not a pending merge."
               exit 1
             fi
-            echo "::warning::preprocessCapacity.json not found on neonbinder/neonbinder@main (404) — skipping the heavy/fast capacity parity check for ${ENV_NAME}. Expected only until the companion NEO-299 monorepo PR merges; if this warning persists past that, something is wrong."
+            echo "::warning::preprocessCapacity.json not found on neonbinder/neonbinder-app@main (404) — skipping the heavy/fast capacity parity check for ${ENV_NAME}. Expected only until the companion NEO-299 monorepo PR merges; if this warning persists past that, something is wrong."
             exit 0
           fi
           if [ "$HTTP_CODE" != "200" ]; then
