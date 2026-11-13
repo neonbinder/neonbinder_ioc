@@ -11,7 +11,7 @@ one exception is the secret-GC SA (`secret_gc_workflow_ref`), which is
 workflow-ref pinned.
 
 `github_repo_monorepo` and `github_repo_preprocess` both resolve to
-`neonbinder/neonbinder` post-NEO-123, so the browser and preprocess deployer SAs
+`neonbinder/neonbinder-app` post-NEO-123, so the browser and preprocess deployer SAs
 are reachable from *any* workflow in the monorepo, in both prod and dev.
 
 **Why:** it means a CI PR that wires an existing deployer SA into an additional

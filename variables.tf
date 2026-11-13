@@ -72,7 +72,38 @@ variable "cloud_run_max_instances" {
 variable "github_repo_monorepo" {
   description = "Consolidated monorepo (owner/repo) allowed to authenticate via WIF for browser deploy / per-PR Cloud Run preview"
   type        = string
-  default     = "neonbinder/neonbinder"
+  default     = "neonbinder/neonbinder-app"
+}
+
+# S1 (NEO-546): WIF trust is pinned to GitHub's immutable numeric ids as well
+# as the owner/repo name. Names can be renamed, transferred or retired and then
+# claimed by someone else (the NEO-546 org move proved it); the numeric owner
+# and repository ids never change. Compared as strings in the provider
+# attribute_condition; principalSet bindings stay on attribute.repository.
+variable "github_owner_id" {
+  description = "Immutable numeric GitHub id of the owning org (assertion.repository_owner_id)"
+  type        = string
+  default     = "356416538"
+}
+
+variable "github_repo_monorepo_id" {
+  description = "Immutable numeric GitHub repository id of the monorepo (assertion.repository_id)"
+  type        = string
+  default     = "1280859931"
+}
+
+variable "github_repo_terraform_id" {
+  description = "Immutable numeric GitHub repository id of the terraform repo (assertion.repository_id)"
+  type        = string
+  default     = "1014368750"
+}
+
+# Its own variable (like github_repo_preprocess) so the preprocess lane can be
+# re-pinned independently; it currently equals the monorepo id.
+variable "github_repo_preprocess_id" {
+  description = "Immutable numeric GitHub repository id for the preprocess lane (assertion.repository_id)"
+  type        = string
+  default     = "1280859931"
 }
 
 variable "github_repo_terraform" {
@@ -89,13 +120,13 @@ variable "github_repo_terraform" {
 # they read one variable rather than two literals.
 #
 # Kept as a distinct variable from github_repo_monorepo even though both now
-# hold "neonbinder/neonbinder": the github-preprocess provider stays separate
+# hold "neonbinder/neonbinder-app": the github-preprocess provider stays separate
 # from the github provider so the two deploy lanes can be trusted, scoped, or
 # revoked independently.
 variable "github_repo_preprocess" {
   description = "GitHub repository (owner/repo) for the preprocess service CI/CD via WIF"
   type        = string
-  default     = "neonbinder/neonbinder"
+  default     = "neonbinder/neonbinder-app"
 }
 
 # Preprocess Cloud Run configuration
@@ -362,7 +393,7 @@ variable "browser_wif_branch_ref" {
 variable "secret_gc_workflow_ref" {
   description = "GitHub `job_workflow_ref` claim allowed to impersonate the neonbinder-secret-gc SA (NEO-115). Format is `owner/repo/.github/workflows/<file>@<ref>`. The ref is the branch the workflow FILE is loaded from — the default branch for both `schedule` and `workflow_dispatch` — not the branch a deploy is allowed from."
   type        = string
-  default     = "neonbinder/neonbinder/.github/workflows/secret-version-gc.yml@refs/heads/main"
+  default     = "neonbinder/neonbinder-app/.github/workflows/secret-version-gc.yml@refs/heads/main"
 }
 
 variable "browser_wif_allow_pull_requests" {
