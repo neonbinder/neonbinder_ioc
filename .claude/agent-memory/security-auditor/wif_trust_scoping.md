@@ -25,4 +25,15 @@ the only real finding would be that the *narrowing* to `job_workflow_ref` is
 still untracked. If it is `attribute.job_workflow_ref/...`, then adding a new
 workflow genuinely requires a terraform change and is worth flagging.
 
+**google.subject mapping is audit-only here.** No binding in the pool keys on
+`principal://.../subject/...`; every grant is a `principalSet` on
+`attribute.repository` or `attribute.job_workflow_ref`. GCP caps a mapped
+`google.subject` at 127 bytes, and a GitHub merge-queue run's `sub` (which
+embeds `gh-readonly-queue/<base>/pr-<N>-<40-char sha>`) can exceed it, so a
+conditional CEL mapping for `event_name == 'merge_group'` to a short
+`<prefix>:<repository_id>:<sha>` is safe: GitHub claims are strings, CEL `?:`
+evaluates only the chosen branch, and no GitHub claim key can form the prefix,
+so it cannot collide with a real `sub`. Re-check for subject bindings before
+approving such a mapping again.
+
 Related: [[terraform_iam_findings]], [[credential_architecture]]
