@@ -374,7 +374,7 @@ resource "google_artifact_registry_repository" "gcr_io" {
   # delete below only reaps older ones. The fake deploys rarely and only from
   # main, so its serving image is always near the top of the rank.
   dynamic "cleanup_policies" {
-    for_each = var.create_fake_bsc ? [1] : []
+    for_each = local.fake_bsc_enabled ? [1] : []
     content {
       id     = "keep-recent-fake-bsc"
       action = "KEEP"
@@ -387,7 +387,7 @@ resource "google_artifact_registry_repository" "gcr_io" {
   }
 
   dynamic "cleanup_policies" {
-    for_each = var.create_fake_bsc ? [1] : []
+    for_each = local.fake_bsc_enabled ? [1] : []
     content {
       id     = "delete-tagged-fake-bsc"
       action = "DELETE"
@@ -3566,7 +3566,7 @@ resource "google_cloud_scheduler_job" "login_canary_sportlots" {
 #
 # Everything here is gated on var.create_fake_bsc, which only dev.tfvars sets.
 # Nothing in this block references a prod SA, and the service refuses to exist
-# outside the dev environment (precondition below).
+# outside the dev environment (local.fake_bsc_enabled).
 #
 # Cost: min 0 / max 1 instance, 1 vCPU, 512Mi, request-based billing, so an
 # idle fake costs nothing; the bucket holds a few MB of recordings; two secret
@@ -3579,11 +3579,16 @@ data "google_project" "current" {
 }
 
 locals {
+  # Off outside dev even if a tfvars file sets create_fake_bsc. (A lifecycle
+  # precondition would say this louder, but CI pins Terraform "~> 1.0", which
+  # resolves to 1.0.x and has no preconditions.)
+  fake_bsc_enabled = var.create_fake_bsc && var.environment == "dev"
+
   fake_bsc_url = "https://${var.fake_bsc_service_name}-${data.google_project.current.number}.${var.gcp_region}.run.app"
 }
 
 resource "google_service_account" "fake_bsc_runtime" {
-  count        = var.create_fake_bsc ? 1 : 0
+  count        = local.fake_bsc_enabled ? 1 : 0
   account_id   = "neonbinder-fake-bsc-runtime"
   display_name = "NeonBinder Fake BSC Runtime"
   description  = "NEO-552: runtime identity of the fake BSC Cloud Run service (dev only)"
@@ -3592,14 +3597,14 @@ resource "google_service_account" "fake_bsc_runtime" {
 # Loader identity: the local recorder impersonates this SA to call the fake's
 # admin endpoints. It holds run.invoker on the fake and nothing else.
 resource "google_service_account" "fake_bsc_loader" {
-  count        = var.create_fake_bsc ? 1 : 0
+  count        = local.fake_bsc_enabled ? 1 : 0
   account_id   = "fake-bsc-loader"
   display_name = "Fake BSC Loader"
   description  = "NEO-552: identity the local recorder uses to load recordings into the fake (dev only)"
 }
 
 resource "google_project_iam_member" "fake_bsc_runtime_logging_writer" {
-  count   = var.create_fake_bsc ? 1 : 0
+  count   = local.fake_bsc_enabled ? 1 : 0
   project = var.gcp_project_id
   role    = "roles/logging.logWriter"
   member  = "serviceAccount:${google_service_account.fake_bsc_runtime[0].email}"
@@ -3607,7 +3612,7 @@ resource "google_project_iam_member" "fake_bsc_runtime_logging_writer" {
 
 # Developers impersonate the loader (recorder runs on a laptop).
 resource "google_service_account_iam_member" "developer_impersonate_fake_bsc_loader" {
-  for_each           = var.create_fake_bsc ? toset(var.developer_emails) : toset([])
+  for_each           = local.fake_bsc_enabled ? toset(var.developer_emails) : toset([])
   service_account_id = google_service_account.fake_bsc_loader[0].name
   role               = "roles/iam.serviceAccountTokenCreator"
   member             = "user:${each.value}"
@@ -3615,14 +3620,14 @@ resource "google_service_account_iam_member" "developer_impersonate_fake_bsc_loa
 
 # Deployer / tf-deployer must be able to attach the runtime SA to the service.
 resource "google_service_account_iam_member" "fake_bsc_deployer_act_as_runtime" {
-  count              = var.create_fake_bsc ? 1 : 0
+  count              = local.fake_bsc_enabled ? 1 : 0
   service_account_id = google_service_account.fake_bsc_runtime[0].name
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${google_service_account.deployer.email}"
 }
 
 resource "google_service_account_iam_member" "tf_deployer_act_as_fake_bsc_runtime" {
-  count              = var.create_fake_bsc ? 1 : 0
+  count              = local.fake_bsc_enabled ? 1 : 0
   service_account_id = google_service_account.fake_bsc_runtime[0].name
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${google_service_account.terraform_deployer.email}"
@@ -3631,7 +3636,7 @@ resource "google_service_account_iam_member" "tf_deployer_act_as_fake_bsc_runtim
 # ── Recordings bucket ──
 
 resource "google_storage_bucket" "fake_bsc_recordings" {
-  count    = var.create_fake_bsc ? 1 : 0
+  count    = local.fake_bsc_enabled ? 1 : 0
   name     = "neonbinder-dev-fake-bsc-recordings"
   location = var.gcp_region
 
@@ -3661,7 +3666,7 @@ resource "google_storage_bucket" "fake_bsc_recordings" {
 # The fake reads, writes and promotes recordings. objectAdmin is scoped to
 # this one bucket.
 resource "google_storage_bucket_iam_member" "fake_bsc_runtime_recordings_admin" {
-  count  = var.create_fake_bsc ? 1 : 0
+  count  = local.fake_bsc_enabled ? 1 : 0
   bucket = google_storage_bucket.fake_bsc_recordings[0].name
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${google_service_account.fake_bsc_runtime[0].email}"
@@ -3674,7 +3679,7 @@ resource "google_storage_bucket_iam_member" "fake_bsc_runtime_recordings_admin" 
 # BSC credentials. Rotation = add a new version; secret-version-gc prunes.
 
 resource "google_secret_manager_secret" "fake_bsc_caller_key" {
-  count     = var.create_fake_bsc ? 1 : 0
+  count     = local.fake_bsc_enabled ? 1 : 0
   secret_id = "fake-bsc-caller-key"
 
   replication {
@@ -3685,7 +3690,7 @@ resource "google_secret_manager_secret" "fake_bsc_caller_key" {
 }
 
 resource "google_secret_manager_secret" "fake_bsc_admin_key" {
-  count     = var.create_fake_bsc ? 1 : 0
+  count     = local.fake_bsc_enabled ? 1 : 0
   secret_id = "fake-bsc-admin-key"
 
   replication {
@@ -3700,28 +3705,28 @@ resource "google_secret_manager_secret" "fake_bsc_admin_key" {
 # the explicit grant documents intent), the CI deployer (drift-compare and the
 # preview wiring send it), and developers (the recorder sends it).
 resource "google_secret_manager_secret_iam_member" "fake_bsc_caller_key_runtime" {
-  count     = var.create_fake_bsc ? 1 : 0
+  count     = local.fake_bsc_enabled ? 1 : 0
   secret_id = google_secret_manager_secret.fake_bsc_caller_key[0].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.fake_bsc_runtime[0].email}"
 }
 
 resource "google_secret_manager_secret_iam_member" "fake_bsc_caller_key_browser_runtime" {
-  count     = var.create_fake_bsc ? 1 : 0
+  count     = local.fake_bsc_enabled ? 1 : 0
   secret_id = google_secret_manager_secret.fake_bsc_caller_key[0].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.runtime.email}"
 }
 
 resource "google_secret_manager_secret_iam_member" "fake_bsc_caller_key_deployer" {
-  count     = var.create_fake_bsc ? 1 : 0
+  count     = local.fake_bsc_enabled ? 1 : 0
   secret_id = google_secret_manager_secret.fake_bsc_caller_key[0].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.deployer.email}"
 }
 
 resource "google_secret_manager_secret_iam_member" "fake_bsc_caller_key_developer" {
-  for_each  = var.create_fake_bsc ? toset(var.developer_emails) : toset([])
+  for_each  = local.fake_bsc_enabled ? toset(var.developer_emails) : toset([])
   secret_id = google_secret_manager_secret.fake_bsc_caller_key[0].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "user:${each.value}"
@@ -3735,21 +3740,21 @@ resource "google_secret_manager_secret_iam_member" "fake_bsc_caller_key_develope
 # deployer's admin identity is also checked by the fake against
 # FAKE_BSC_ADMIN_CALLERS.
 resource "google_secret_manager_secret_iam_member" "fake_bsc_admin_key_runtime" {
-  count     = var.create_fake_bsc ? 1 : 0
+  count     = local.fake_bsc_enabled ? 1 : 0
   secret_id = google_secret_manager_secret.fake_bsc_admin_key[0].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.fake_bsc_runtime[0].email}"
 }
 
 resource "google_secret_manager_secret_iam_member" "fake_bsc_admin_key_deployer" {
-  count     = var.create_fake_bsc ? 1 : 0
+  count     = local.fake_bsc_enabled ? 1 : 0
   secret_id = google_secret_manager_secret.fake_bsc_admin_key[0].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.deployer.email}"
 }
 
 resource "google_secret_manager_secret_iam_member" "fake_bsc_admin_key_developer" {
-  for_each  = var.create_fake_bsc ? toset(var.developer_emails) : toset([])
+  for_each  = local.fake_bsc_enabled ? toset(var.developer_emails) : toset([])
   secret_id = google_secret_manager_secret.fake_bsc_admin_key[0].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "user:${each.value}"
@@ -3758,7 +3763,7 @@ resource "google_secret_manager_secret_iam_member" "fake_bsc_admin_key_developer
 # ── Cloud Run service ──
 
 resource "google_cloud_run_service" "fake_bsc" {
-  count = var.create_fake_bsc ? 1 : 0
+  count = local.fake_bsc_enabled ? 1 : 0
 
   autogenerate_revision_name = true
 
@@ -3875,11 +3880,6 @@ resource "google_cloud_run_service" "fake_bsc" {
   }
 
   lifecycle {
-    precondition {
-      condition     = var.environment == "dev"
-      error_message = "The fake BSC exists in the dev project only."
-    }
-
     ignore_changes = [
       template[0].spec[0].containers[0].image,
       traffic,
@@ -3901,7 +3901,7 @@ resource "google_cloud_run_service" "fake_bsc" {
 # Invokers, exactly: dev Convex SA, dev browser runtime SA, dev browser
 # deployer SA, and the loader. No allUsers, no prod SA.
 resource "google_cloud_run_service_iam_member" "fake_bsc_convex_invoker" {
-  count    = var.create_fake_bsc ? 1 : 0
+  count    = local.fake_bsc_enabled ? 1 : 0
   location = google_cloud_run_service.fake_bsc[0].location
   service  = google_cloud_run_service.fake_bsc[0].name
   role     = "roles/run.invoker"
@@ -3909,7 +3909,7 @@ resource "google_cloud_run_service_iam_member" "fake_bsc_convex_invoker" {
 }
 
 resource "google_cloud_run_service_iam_member" "fake_bsc_browser_runtime_invoker" {
-  count    = var.create_fake_bsc ? 1 : 0
+  count    = local.fake_bsc_enabled ? 1 : 0
   location = google_cloud_run_service.fake_bsc[0].location
   service  = google_cloud_run_service.fake_bsc[0].name
   role     = "roles/run.invoker"
@@ -3917,7 +3917,7 @@ resource "google_cloud_run_service_iam_member" "fake_bsc_browser_runtime_invoker
 }
 
 resource "google_cloud_run_service_iam_member" "fake_bsc_deployer_invoker" {
-  count    = var.create_fake_bsc ? 1 : 0
+  count    = local.fake_bsc_enabled ? 1 : 0
   location = google_cloud_run_service.fake_bsc[0].location
   service  = google_cloud_run_service.fake_bsc[0].name
   role     = "roles/run.invoker"
@@ -3925,7 +3925,7 @@ resource "google_cloud_run_service_iam_member" "fake_bsc_deployer_invoker" {
 }
 
 resource "google_cloud_run_service_iam_member" "fake_bsc_loader_invoker" {
-  count    = var.create_fake_bsc ? 1 : 0
+  count    = local.fake_bsc_enabled ? 1 : 0
   location = google_cloud_run_service.fake_bsc[0].location
   service  = google_cloud_run_service.fake_bsc[0].name
   role     = "roles/run.invoker"
@@ -4029,10 +4029,10 @@ output "preprocess_fast_cloud_run_url" {
 
 output "fake_bsc_url" {
   description = "Deterministic URL origin of the fake BSC (dev only; empty elsewhere). Use as NEONBINDER_FAKE_BSC_URL and as the token audience."
-  value       = var.create_fake_bsc ? local.fake_bsc_url : ""
+  value       = local.fake_bsc_enabled ? local.fake_bsc_url : ""
 }
 
 output "fake_bsc_loader_service_account_email" {
   description = "Loader SA the local recorder impersonates (dev only; empty elsewhere)"
-  value       = var.create_fake_bsc ? google_service_account.fake_bsc_loader[0].email : ""
+  value       = local.fake_bsc_enabled ? google_service_account.fake_bsc_loader[0].email : ""
 }
