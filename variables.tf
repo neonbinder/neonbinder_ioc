@@ -397,7 +397,7 @@ variable "secret_gc_workflow_ref" {
 }
 
 variable "browser_wif_allow_pull_requests" {
-  description = "If true, the neonbinder_browser WIF provider also accepts pull_request OIDC tokens (in addition to push to wif_branch_ref). Enable in dev so per-PR preview deployments can authenticate; keep disabled in prod. Workflow-level guards must still restrict PR previews to same-repo branches."
+  description = "If true, the neonbinder_browser WIF provider also accepts pull_request OIDC tokens (in addition to push to wif_branch_ref). Enable in dev so per-PR preview deployments can authenticate; keep disabled in prod. Fork pull_request previews must stay blocked by the workflows' head.repo.full_name == github.repository guard. The dev provider also accepts merge_group runs on gh-readonly-queue/main/* refs (NEO-546); that relies on the monorepo ci-mode.sh refusing merge groups from fork or Dependabot PRs before any secret-using job, and on a maintainer doing the enqueue."
   type        = bool
   default     = false
 }
@@ -409,7 +409,7 @@ variable "preprocess_wif_branch_ref" {
 }
 
 variable "preprocess_wif_allow_pull_requests" {
-  description = "If true, the preprocess WIF provider also accepts pull_request OIDC tokens (in addition to push to preprocess_wif_branch_ref). Enable in dev so per-PR preview deployments can authenticate; keep disabled in prod. Workflow-level guards must still restrict PR previews to same-repo branches."
+  description = "If true, the preprocess WIF provider also accepts pull_request OIDC tokens (in addition to push to preprocess_wif_branch_ref). Enable in dev so per-PR preview deployments can authenticate; keep disabled in prod. Fork pull_request previews must stay blocked by the workflows' head.repo.full_name == github.repository guard. The dev provider also accepts merge_group runs on gh-readonly-queue/main/* refs (NEO-546); that relies on the monorepo ci-mode.sh refusing merge groups from fork or Dependabot PRs before any secret-using job, and on a maintainer doing the enqueue."
   type        = bool
   default     = false
 }

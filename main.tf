@@ -895,9 +895,11 @@ resource "google_iam_workload_identity_pool_provider" "github" {
   # When browser_wif_allow_pull_requests is true (dev), also accept
   # pull_request OIDC tokens (ref == refs/pull/<N>/merge) so per-PR Cloud
   # Run previews can deploy. Prod keeps the tight push-to-main-only
-  # condition. Workflow-level guards
-  # (head.repo.full_name == github.repository) still prevent fork-
-  # originated previews from acquiring this token.
+  # condition. Fork-originated pull_request previews are kept out by the
+  # workflows' head.repo.full_name == github.repository guard. merge_group
+  # runs (below) are kept safe by the monorepo's ci-mode.sh, which refuses a
+  # merge group from a fork or Dependabot PR (exit 1) before any job that uses
+  # secrets, and by a maintainer doing the enqueue.
   # NEO-18 cutover: the old neonbinder_browser repo is archived; the
   # consolidated monorepo is now the sole trusted repo.
   # NEO-546: GitHub merge-queue runs (event merge_group, ref
@@ -2033,9 +2035,11 @@ resource "google_iam_workload_identity_pool_provider" "github_preprocess" {
   # `refs/heads/main` in both envs. When preprocess_wif_allow_pull_requests
   # is true (dev), also accept pull_request OIDC tokens (ref ==
   # refs/pull/<N>/merge) so per-PR Cloud Run previews can deploy. Prod keeps
-  # the tight push-to-main-only condition. Workflow-level guards
-  # (head.repo.full_name == github.repository) still prevent fork-originated
-  # previews from acquiring this token. Mirrors the browser provider above.
+  # the tight push-to-main-only condition. Fork-originated pull_request
+  # previews are kept out by the workflows' head.repo.full_name ==
+  # github.repository guard; merge_group runs rely on ci-mode.sh refusing fork
+  # and Dependabot merge groups before any secret-using job, plus a maintainer
+  # doing the enqueue. Mirrors the browser provider above.
   # NEO-546: GitHub merge-queue runs (event merge_group, ref
   # refs/heads/gh-readonly-queue/main/pr-<N>-<sha>) are admitted on the dev
   # branch only, inside the repo/owner/repo-id pins. Prod is unchanged.
