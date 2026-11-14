@@ -453,6 +453,24 @@ variable "create_placeholder_bucket" {
   default     = false
 }
 
+variable "create_fake_bsc" {
+  description = "Whether to create the fake BuySportsCards service, its bucket, secrets and SAs (dev only, NEO-552). Must stay false in prod: the fake is a test double that previews and dev call instead of the real site."
+  type        = bool
+  default     = false
+}
+
+variable "fake_bsc_service_name" {
+  description = "Cloud Run service name of the fake BSC (dev only)."
+  type        = string
+  default     = "neonbinder-fake-bsc"
+}
+
+variable "fake_bsc_image" {
+  description = "Bootstrap image for the fake BSC service. Only used by the first apply; the deploy workflow owns the image afterwards (ignore_changes)."
+  type        = string
+  default     = "us-docker.pkg.dev/cloudrun/container/hello"
+}
+
 # NEO-95: the google_billing_budget resource is scoped to the BILLING ACCOUNT,
 # not a project — it must be created exactly once, not once per environment
 # apply. Gate it behind this flag and only set it true in prod.tfvars, so the

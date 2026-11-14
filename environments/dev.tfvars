@@ -6,11 +6,13 @@ preprocess_image       = "gcr.io/neonbinder-dev/neonbinder-preprocess:latest"
 # NEO-299: single source of truth is apps/web/convex/preprocessCapacity.json
 # (heavy.dev, fast.dev) — the terraform.yml parity check compares this file
 # against it on every plan/apply. See variables.tf for the quota arithmetic.
-heavy_preprocess_max_instances     = 6
-preprocess_max_instances           = 3
-create_prizes_bucket               = false
-create_preprocess_fixtures_bucket  = true
-create_placeholder_bucket          = true
+heavy_preprocess_max_instances    = 6
+preprocess_max_instances          = 3
+create_prizes_bucket              = false
+create_preprocess_fixtures_bucket = true
+create_placeholder_bucket         = true
+# NEO-552: standing fake BuySportsCards for previews, worktrees and dev.
+create_fake_bsc                    = true
 create_reference_seed_bucket       = true
 create_preprocess_dev_cache_bucket = true
 wif_branch_ref                     = "refs/heads/develop"
