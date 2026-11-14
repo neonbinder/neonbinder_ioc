@@ -900,7 +900,10 @@ resource "google_iam_workload_identity_pool_provider" "github" {
   # originated previews from acquiring this token.
   # NEO-18 cutover: the old neonbinder_browser repo is archived; the
   # consolidated monorepo is now the sole trusted repo.
-  attribute_condition = var.browser_wif_allow_pull_requests ? "assertion.repository == \"${var.github_repo_monorepo}\" && assertion.repository_owner_id == \"${var.github_owner_id}\" && assertion.repository_id == \"${var.github_repo_monorepo_id}\" && (assertion.ref == \"${var.browser_wif_branch_ref}\" || assertion.event_name == \"pull_request\")" : "assertion.repository == \"${var.github_repo_monorepo}\" && assertion.repository_owner_id == \"${var.github_owner_id}\" && assertion.repository_id == \"${var.github_repo_monorepo_id}\" && assertion.ref == \"${var.browser_wif_branch_ref}\""
+  # NEO-546: GitHub merge-queue runs (event merge_group, ref
+  # refs/heads/gh-readonly-queue/main/pr-<N>-<sha>) are admitted on the dev
+  # branch only, inside the repo/owner/repo-id pins. Prod is unchanged.
+  attribute_condition = var.browser_wif_allow_pull_requests ? "assertion.repository == \"${var.github_repo_monorepo}\" && assertion.repository_owner_id == \"${var.github_owner_id}\" && assertion.repository_id == \"${var.github_repo_monorepo_id}\" && (assertion.ref == \"${var.browser_wif_branch_ref}\" || assertion.event_name == \"pull_request\" || (assertion.event_name == \"merge_group\" && assertion.ref.startsWith(\"refs/heads/gh-readonly-queue/main/\")))" : "assertion.repository == \"${var.github_repo_monorepo}\" && assertion.repository_owner_id == \"${var.github_owner_id}\" && assertion.repository_id == \"${var.github_repo_monorepo_id}\" && assertion.ref == \"${var.browser_wif_branch_ref}\""
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
@@ -2033,7 +2036,10 @@ resource "google_iam_workload_identity_pool_provider" "github_preprocess" {
   # the tight push-to-main-only condition. Workflow-level guards
   # (head.repo.full_name == github.repository) still prevent fork-originated
   # previews from acquiring this token. Mirrors the browser provider above.
-  attribute_condition = var.preprocess_wif_allow_pull_requests ? "assertion.repository == \"${var.github_repo_preprocess}\" && assertion.repository_owner_id == \"${var.github_owner_id}\" && assertion.repository_id == \"${var.github_repo_preprocess_id}\" && (assertion.ref == \"${var.preprocess_wif_branch_ref}\" || assertion.event_name == \"pull_request\")" : "assertion.repository == \"${var.github_repo_preprocess}\" && assertion.repository_owner_id == \"${var.github_owner_id}\" && assertion.repository_id == \"${var.github_repo_preprocess_id}\" && assertion.ref == \"${var.preprocess_wif_branch_ref}\""
+  # NEO-546: GitHub merge-queue runs (event merge_group, ref
+  # refs/heads/gh-readonly-queue/main/pr-<N>-<sha>) are admitted on the dev
+  # branch only, inside the repo/owner/repo-id pins. Prod is unchanged.
+  attribute_condition = var.preprocess_wif_allow_pull_requests ? "assertion.repository == \"${var.github_repo_preprocess}\" && assertion.repository_owner_id == \"${var.github_owner_id}\" && assertion.repository_id == \"${var.github_repo_preprocess_id}\" && (assertion.ref == \"${var.preprocess_wif_branch_ref}\" || assertion.event_name == \"pull_request\" || (assertion.event_name == \"merge_group\" && assertion.ref.startsWith(\"refs/heads/gh-readonly-queue/main/\")))" : "assertion.repository == \"${var.github_repo_preprocess}\" && assertion.repository_owner_id == \"${var.github_owner_id}\" && assertion.repository_id == \"${var.github_repo_preprocess_id}\" && assertion.ref == \"${var.preprocess_wif_branch_ref}\""
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
