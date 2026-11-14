@@ -876,7 +876,13 @@ resource "google_iam_workload_identity_pool_provider" "github" {
   display_name                       = "GitHub"
 
   attribute_mapping = {
-    "google.subject"       = "assertion.sub"
+    # NEO-546: google.subject is capped at 127 bytes. A merge-queue run's sub
+    # embeds its gh-readonly-queue/main/pr-<N>-<40-char sha> ref and goes over
+    # the cap, which fails the token exchange. Queue runs get a short subject
+    # (repository id + head sha); every other event keeps assertion.sub as is.
+    # No IAM binding uses principal://.../subject/, so this changes audit-log
+    # identity only.
+    "google.subject"       = "assertion.event_name == 'merge_group' ? 'merge_group:' + assertion.repository_id + ':' + assertion.sha : assertion.sub"
     "attribute.repository" = "assertion.repository"
     "attribute.ref"        = "assertion.ref"
     "attribute.event_name" = "assertion.event_name"
@@ -2025,7 +2031,13 @@ resource "google_iam_workload_identity_pool_provider" "github_preprocess" {
   display_name                       = "GitHub Preprocess"
 
   attribute_mapping = {
-    "google.subject"       = "assertion.sub"
+    # NEO-546: google.subject is capped at 127 bytes. A merge-queue run's sub
+    # embeds its gh-readonly-queue/main/pr-<N>-<40-char sha> ref and goes over
+    # the cap, which fails the token exchange. Queue runs get a short subject
+    # (repository id + head sha); every other event keeps assertion.sub as is.
+    # No IAM binding uses principal://.../subject/, so this changes audit-log
+    # identity only.
+    "google.subject"       = "assertion.event_name == 'merge_group' ? 'merge_group:' + assertion.repository_id + ':' + assertion.sha : assertion.sub"
     "attribute.repository" = "assertion.repository"
     "attribute.ref"        = "assertion.ref"
     "attribute.event_name" = "assertion.event_name"
