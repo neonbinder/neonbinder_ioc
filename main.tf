@@ -3725,9 +3725,10 @@ resource "google_secret_manager_secret_iam_member" "fake_bsc_caller_key_deployer
   member    = "serviceAccount:${google_service_account.deployer.email}"
 }
 
-# viewer = versions.get/list, so the deploy preflight can resolve `latest` to a
-# pinned version number (resolve-secret-version.sh). It grants no
-# versions.access; the binding above is what reads the value.
+# viewer = secrets.get/getIamPolicy + versions.get/list, so the deploy
+# preflight can resolve `latest` to a pinned version number
+# (resolve-secret-version.sh). No versions.access; the binding above reads
+# the value.
 resource "google_secret_manager_secret_iam_member" "fake_bsc_caller_key_deployer_viewer" {
   count     = local.fake_bsc_enabled ? 1 : 0
   secret_id = google_secret_manager_secret.fake_bsc_caller_key[0].secret_id
