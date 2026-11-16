@@ -397,7 +397,7 @@ variable "secret_gc_workflow_ref" {
 }
 
 variable "browser_wif_allow_pull_requests" {
-  description = "If true, the neonbinder_browser WIF provider also accepts pull_request OIDC tokens (in addition to push to wif_branch_ref). Enable in dev so per-PR preview deployments can authenticate; keep disabled in prod. Workflow-level guards must still restrict PR previews to same-repo branches."
+  description = "If true, the neonbinder_browser WIF provider also accepts pull_request OIDC tokens (in addition to push to wif_branch_ref). Enable in dev so per-PR preview deployments can authenticate; keep disabled in prod. Fork pull_request previews must stay blocked by the workflows' head.repo.full_name == github.repository guard. The dev provider also accepts merge_group runs on gh-readonly-queue/main/* refs (NEO-546); that relies on the monorepo ci-mode.sh refusing merge groups from fork or Dependabot PRs before any secret-using job, and on a maintainer doing the enqueue."
   type        = bool
   default     = false
 }
@@ -409,7 +409,7 @@ variable "preprocess_wif_branch_ref" {
 }
 
 variable "preprocess_wif_allow_pull_requests" {
-  description = "If true, the preprocess WIF provider also accepts pull_request OIDC tokens (in addition to push to preprocess_wif_branch_ref). Enable in dev so per-PR preview deployments can authenticate; keep disabled in prod. Workflow-level guards must still restrict PR previews to same-repo branches."
+  description = "If true, the preprocess WIF provider also accepts pull_request OIDC tokens (in addition to push to preprocess_wif_branch_ref). Enable in dev so per-PR preview deployments can authenticate; keep disabled in prod. Fork pull_request previews must stay blocked by the workflows' head.repo.full_name == github.repository guard. The dev provider also accepts merge_group runs on gh-readonly-queue/main/* refs (NEO-546); that relies on the monorepo ci-mode.sh refusing merge groups from fork or Dependabot PRs before any secret-using job, and on a maintainer doing the enqueue."
   type        = bool
   default     = false
 }
@@ -451,6 +451,24 @@ variable "create_placeholder_bucket" {
   description = "Whether to create the placeholder-uploads GCS bucket (dev + prod)."
   type        = bool
   default     = false
+}
+
+variable "create_fake_bsc" {
+  description = "Whether to create the fake BuySportsCards service, its bucket, secrets and SAs (dev only, NEO-552). Must stay false in prod: the fake is a test double that previews and dev call instead of the real site."
+  type        = bool
+  default     = false
+}
+
+variable "fake_bsc_service_name" {
+  description = "Cloud Run service name of the fake BSC (dev only)."
+  type        = string
+  default     = "neonbinder-fake-bsc"
+}
+
+variable "fake_bsc_image" {
+  description = "Bootstrap image for the fake BSC service. Only used by the first apply; the deploy workflow owns the image afterwards (ignore_changes)."
+  type        = string
+  default     = "us-docker.pkg.dev/cloudrun/container/hello"
 }
 
 # NEO-95: the google_billing_budget resource is scoped to the BILLING ACCOUNT,
