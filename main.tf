@@ -1502,11 +1502,16 @@ resource "google_secret_manager_secret" "sportlots_automated_access" {
 # secret-version-gc.yml prunes older versions, so redeploy before it destroys
 # the one a running revision pins.
 #
-# IAM: the browser runtime SA gets an explicit accessor binding below, so this
-# dependency survives any future narrowing of its project-wide
-# roles/secretmanager.admin. The deployer SA gets read-only metadata on THIS
-# secret only, so the deploy workflows can preflight that the latest version is
-# enabled before Cloud Run is asked to mount it.
+# IAM (production only, NEO-555): the browser runtime SA gets an explicit
+# accessor binding below, so this dependency survives any future narrowing of
+# its project-wide roles/secretmanager.admin. The deployer SA gets read-only
+# metadata on THIS secret only, so the deploy workflows can preflight that the
+# latest version is enabled before Cloud Run is asked to mount it. Since
+# NEO-555 the dev browser service runs against the fake eBay and no dev deploy
+# mounts or preflights this secret (the monorepo's browser-deploy.yml
+# preflights it only for production; dev deploys remove the mount), so dev
+# keeps the secret shell, holding the sandbox Cert ID used only by a
+# maintainer's local recorder, with no service-account bindings.
 resource "google_secret_manager_secret" "ebay_client_secret" {
   secret_id = "ebay-client-secret"
 
@@ -1520,6 +1525,7 @@ resource "google_secret_manager_secret" "ebay_client_secret" {
 # Least-privilege read for the runtime SA: Cloud Run resolves this secret into
 # EBAY_CLIENT_SECRET as the runtime identity (NEO-415).
 resource "google_secret_manager_secret_iam_member" "runtime_ebay_client_secret_accessor" {
+  count     = var.environment == "dev" ? 0 : 1
   secret_id = google_secret_manager_secret.ebay_client_secret.secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.runtime.email}"
@@ -1529,10 +1535,14 @@ resource "google_secret_manager_secret_iam_member" "runtime_ebay_client_secret_a
 # versions.access, so the deployer can see that a version exists but cannot
 # read the Cert ID.
 resource "google_secret_manager_secret_iam_member" "deployer_ebay_client_secret_viewer" {
+  count     = var.environment == "dev" ? 0 : 1
   secret_id = google_secret_manager_secret.ebay_client_secret.secret_id
   role      = "roles/secretmanager.viewer"
   member    = "serviceAccount:${google_service_account.deployer.email}"
 }
+
+# Adding count needs no `moved` block (CI's Terraform 1.0.x has none): an
+# existing un-indexed instance is taken as [0], so prod plans no change.
 
 # ──────────────────────────────────────────────
 # Preprocess FAST runtime SA (NEO-175, security control #2) — dedicated, not
