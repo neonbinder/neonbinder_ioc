@@ -1541,16 +1541,10 @@ resource "google_secret_manager_secret_iam_member" "deployer_ebay_client_secret_
   member    = "serviceAccount:${google_service_account.deployer.email}"
 }
 
-# Keep prod's existing bindings in place when the resources gain a count.
-moved {
-  from = google_secret_manager_secret_iam_member.runtime_ebay_client_secret_accessor
-  to   = google_secret_manager_secret_iam_member.runtime_ebay_client_secret_accessor[0]
-}
-
-moved {
-  from = google_secret_manager_secret_iam_member.deployer_ebay_client_secret_viewer
-  to   = google_secret_manager_secret_iam_member.deployer_ebay_client_secret_viewer[0]
-}
+# Prod's existing bindings were moved to the [0] addresses with
+# `terraform state mv` before this reached main: CI pins Terraform ~> 1.0
+# (1.0.x), which has no `moved` blocks, and a destroy-and-recreate of the same
+# IAM member in one apply could leave prod without the binding.
 
 # ──────────────────────────────────────────────
 # Preprocess FAST runtime SA (NEO-175, security control #2) — dedicated, not
